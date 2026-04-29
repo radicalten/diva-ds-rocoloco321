@@ -10,7 +10,7 @@ check out the third-party directory for building the required third-party librar
 * libogg and libremor: Integer-only Ogg vorbis decoder
 * libjpeg-turbo : jpeg image decoder
 * zlib : data compression, dependency for libpng
-* libpng : png image decoder
+* libpng : png image decode
 
 
 with everything set up, make should generate a working .nds file
