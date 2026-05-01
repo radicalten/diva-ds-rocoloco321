@@ -1,0 +1,6 @@
+
+*.d
+*.o
+/build
+*.nds
+Makefile-old
