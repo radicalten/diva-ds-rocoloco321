@@ -51,7 +51,7 @@ Menu::Menu() {
 Menu::~Menu() {
 	shared_menu = NULL;
 	if (state == 1) {
-		stopAudio();
+		//stopAudio();
 	}
 	fadeOut(3, true);
 	vramSetBankF(VRAM_F_LCD);
@@ -67,7 +67,7 @@ void Menu::loop() {
 			loadBanner();
 			loadBuffer();
 		}
-		if (!idleAudio()) {mmStreamUpdate();}
+		//if (!idleAudio()) {mmStreamUpdate();}
 		if (state != 0) {
 			return;
 		}

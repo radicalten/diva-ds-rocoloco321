@@ -9,7 +9,7 @@
 #define BLUEMASK 0b111110000000000
 #include <nds.h>
 #include <string>
-#include <jpeglib.h>
+#include <gba-jpeg-decode.h>
 #include <png.h>
 struct transform {
 	u32 source_width;
@@ -24,10 +24,14 @@ struct transform {
 		if (row_buffer) {delete[] row_buffer;}
 	};
 };
+
+/*
 struct jpeg_error {
 	struct jpeg_error_mgr mgr;
 	struct transform* tinfo;
 };
+
+*/
 struct bmp {
 	const char* bm = "BM";
 	const char* dds = "!dds";
@@ -48,8 +52,8 @@ bool loadArtwork(std::string filepath, u16* dest, uint width, uint height);
 bool processFile(FILE** infile, std::string);
 void processScanline(struct transform* tinfo, u8* scanline, uint count);
 void pixelToOutput(uint out_x, uint row, struct transform* tinfo);
-bool fromJpeg(FILE* infile, struct transform* tinfo);
-void errorJpeg(j_common_ptr cinfo);
+//bool fromJpeg(FILE* infile, struct transform* tinfo);
+//void errorJpeg(j_common_ptr cinfo);
 bool fromPng(FILE* infile, struct transform* tinfo);
 void infoPng(png_structp png_ptr, png_infop info_ptr);
 void rowPng(png_structp png_ptr, png_bytep new_row, png_uint_32 row_num, int pass);

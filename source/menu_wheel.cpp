@@ -288,7 +288,7 @@ void MenuWheel::render() {
 		}
 		updateFrameBg();
 		updateSong();
-		stopAudio();
+		//stopAudio();
 	}
 	renderChar(angle);
 	if (frame > 0) {

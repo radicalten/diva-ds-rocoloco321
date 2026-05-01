@@ -2,7 +2,8 @@
 #include <string>
 #include <iostream>
 #include <algorithm>
-#include <jpeglib.h>
+//#include <gba-jpeg-decode.h>
+//#include <gba-jpeg.h>
 #include <zlib.h>
 #include <png.h>
 #include "main.h"
@@ -20,6 +21,7 @@ bool loadArtwork(string filepath, u16* dest, uint width, uint height) {
 	tinfo.output_height = height;
 	tinfo.output = dest;
 	string extension = filepath.substr(filepath.find_last_of(".") + 1);
+	/*
 	if (extension == "jpeg" || extension == "jpg") {
 		if (processFile(&infile, filepath)) {
 			success = fromJpeg(infile, &tinfo);
@@ -31,14 +33,15 @@ bool loadArtwork(string filepath, u16* dest, uint width, uint height) {
 				}
 			}
 		}
-	} else if (extension == "png") {
+	} else*/ if (extension == "png") {
 		if (processFile(&infile, filepath)) {
 			success = fromPng(infile, &tinfo);
 			if (!success) {
 				//why would they do that?
 				fclose(infile);
 				if (processFile(&infile, filepath)) {
-					success = fromJpeg(infile, &tinfo);
+					//success = fromJpeg(infile, &tinfo);
+					success = fromBmp(infile, dest, width, height);
 				}
 			}
 		}
@@ -130,6 +133,7 @@ void pixelToOutput(uint out_x, uint row, struct transform* tinfo) {
 }
 
 bool fromJpeg(FILE* infile, struct transform* tinfo) {
+	/*
 	struct jpeg_decompress_struct cinfo;
 	struct jpeg_error jerr;
 	cinfo.err = jpeg_std_error(&jerr.mgr);
@@ -155,9 +159,14 @@ bool fromJpeg(FILE* infile, struct transform* tinfo) {
 	}
 	jpeg_finish_decompress(&cinfo);
 	jpeg_destroy_decompress(&cinfo);
+	*/
+	//uint16_t buffer[256 * 192];
+	//JPEG_DecompressImage(infile, buffer, 256, 80);
 	return true;
 }
 
+
+/*
 void errorJpeg(j_common_ptr cinfo) {
     char msg[JMSG_LENGTH_MAX];
     struct jpeg_error* err = (jpeg_error*)cinfo->err;
@@ -166,7 +175,7 @@ void errorJpeg(j_common_ptr cinfo) {
 	err->tinfo->error_msg = msg;
     cout << "\nlibjpeg-turbo fatal error: " << msg;
 }
-
+*/
 bool fromPng(FILE* infile, struct transform* tinfo) {
 	u_char inbuf[PNGBUFFER];
 	if (fread(inbuf, 1, 8, infile) != 8) {

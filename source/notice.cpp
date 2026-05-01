@@ -106,7 +106,7 @@ void Notice::loop() {
 		oamUpdate(&oamMain);
 		oamUpdate(&oamSub);
 		bgUpdate();
-		if (!idleAudio()) {mmStreamUpdate();}
+		//if (!idleAudio()) {mmStreamUpdate();}
 		fadeUpdate();
 		swiWaitForVBlank();
 		if (state != 2) {return;}

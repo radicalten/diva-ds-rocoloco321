@@ -27,7 +27,7 @@ Play::Play() {
 	song = new songdata;
 	parseSimFile(song, simpath);
 	parseChart(song, songchart);
-	loadAudio(songpath + "/" + song->music);
+	//loadAudio(songpath + "/" + song->music);
 	setBrightness(1, 0);
 	oamUpdate(&oamMain);
 	oamUpdate(&oamSub);
@@ -65,7 +65,7 @@ Play::Play() {
 
 Play::~Play() {
 	shared_play = NULL;
-	stopAudio();
+	//stopAudio();
 	if (state == 0) {
 		fadeOut(3, true);
 		vramSetBankF(VRAM_F_LCD);
@@ -81,15 +81,15 @@ Play::~Play() {
 
 void Play::loop(){
 	fadeIn(2, false);
-	playAudio();
+	//playAudio();
 	TIMER0_CR = TIMER_ENABLE | TIMER_DIV_1024;
 	TIMER1_CR = TIMER_ENABLE | TIMER_CASCADE;
 	shared_play = this;
 	while (1) {
 		//frame();
-		if (!idleAudio()) {mmStreamUpdate();}
+		//if (!idleAudio()) {mmStreamUpdate();}
 		swiWaitForVBlank();
-		if (cursor_end && beat >= beat_end && idleAudio()) {state = 0;}
+		if (cursor_end && beat >= beat_end /*&& idleAudio()*/) {state = 0;}
 		if (keysDown() & KEY_START) {state = 3;}
 		if (state != 1) {return;}
 	}

@@ -5,13 +5,13 @@
 #include "sound.h"
 #include <maxmod9.h>
 
-#include <tremor/ivorbiscodec.h>
-#include <tremor/ivorbisfile.h>
-#include <mad.h>
+//#include <tremor/ivorbiscodec.h>
+//#include <tremor/ivorbisfile.h>
+//#include <mad.h>
 #include <climits>
 
 using namespace std;
-
+/*
 struct audio audio;
 
 audio::audio() {
@@ -226,3 +226,5 @@ void stopAudio() {
 	audio.end();
 	idleAudio();
 }
+
+*/

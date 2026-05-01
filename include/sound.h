@@ -5,9 +5,11 @@
 #include <string>
 #include <stdio.h>
 #include <maxmod9.h>
-#include <mad.h>
-#include <tremor/ivorbiscodec.h>
-#include <tremor/ivorbisfile.h>
+//#include <mad.h>
+//#include <tremor/ivorbiscodec.h>
+//#include <tremor/ivorbisfile.h>
+
+/*
 struct mp3 {
 	struct mad_stream stream;
 	struct mad_frame frame;
@@ -28,6 +30,7 @@ struct audio {
 	audio();
 	void end();
 };
+*/
 bool loadAudio(std::string path);
 bool loadMp3();
 void fillMp3();

@@ -5,12 +5,12 @@
 #include <sys/dir.h>
 #include <unistd.h>
 
-#include <mad.h>
-#include <tremor/ivorbiscodec.h>
-#include <tremor/ivorbisfile.h>
+//#include <mad.h>
+#//include <tremor/ivorbiscodec.h>
+//#include <tremor/ivorbisfile.h>
 #include <zlib.h>
 #include <png.h>
-#include <jpeglib.h>
+#include <gba-jpeg-decode.h>
 
 #include <iostream>
 #include <string>
@@ -57,7 +57,6 @@ int main(){
 	font.numColors = fontPalLen / 2;
 	font.bpp = 4;
 	font.asciiOffset = 32;
-	font.convertSingleColor = false;
 	consoleSetFont(console, &font);
 	bgSetPriority(console->bgId, 0);
 	consoleid = console->bgId;
@@ -75,12 +74,12 @@ int main(){
 	}
 
 	//library versions
-	cout << "\nlibmad " << MAD_VERSION_MAJOR << "." << MAD_VERSION_MINOR << "." << MAD_VERSION_PATCH;
-	cout << "\nlibogg 1.3.4";
+	//cout << "\nlibmad " << MAD_VERSION_MAJOR << "." << MAD_VERSION_MINOR << "." << MAD_VERSION_PATCH;
+	//cout << "\nlibogg 1.3.4";
 	cout << "\nlibtremor lowmem 1.0.2";
 	cout << "\nzlib " << ZLIB_VERSION;
 	cout << "\nlibpng " << PNG_LIBPNG_VER_STRING;
-	cout << "\nlibjpeg-turbo " << JPEG_LIB_VERSION;
+	//cout << "\nlibjpeg-turbo " << JPEG_LIB_VERSION;
 
 	setBackdropColor(ARGB16(1, 29, 29, 29));
 	setBackdropColorSub(ARGB16(1, 29, 29, 29));
@@ -143,7 +142,7 @@ bool ddsCheck() {
 	if (!dir) {
 		cout << "\nCan't find dds folder";
 		cout << "\nTrying to create it";
-		mkdir("/dds",777);
+		//mkdir("/dds",777);
 		dir = opendir("/dds"); 
 		if (!dir) {
 			cout << "\nCouldn't create dds folder";
