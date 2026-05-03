@@ -33,12 +33,12 @@ SDIMAGE		:= image.bin
 # -----------------
 
 SOURCEDIRS	:= source
-INCLUDEDIRS	:= include
+INCLUDEDIRS	:=
 GFXDIRS		:= gfx
 BINDIRS		:=
 AUDIODIRS	:=
 # List of folders to combine into the root of NitroFS:
-NITROFSDIR	:=
+NITROFSDIR	:= nitrofs
 
 # Defines passed to all files
 # ---------------------------

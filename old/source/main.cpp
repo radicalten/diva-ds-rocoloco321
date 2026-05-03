@@ -62,24 +62,24 @@ int main(){
 	consoleid = console->bgId;
 
 	if (!fatInitDefault()) {
-		cout << "\nFailed to load libfat";
-		cout << "\nIf you're using a flashcard, try to patch dds.nds with a DLDI patch";
+		printf("Failed to load libfat\n");
+		printf("If you're using a flashcard, try to patch dds.nds with a DLDI patch\n");
 		error();
 	}
 
 	if (!ddsCheck()) {
-		cout << "\nTry placing dds.nds at root of your sdcard and create a dds folder";
-		cout << "\nAlso check if your sd card is write protected";
+		printf("Try placing dds.nds at root of your sdcard and create a dds folder\n");
+		printf("Also check if your sd card is write protected\n");
 		error();
 	}
 
 	//library versions
-	//cout << "\nlibmad " << MAD_VERSION_MAJOR << "." << MAD_VERSION_MINOR << "." << MAD_VERSION_PATCH;
-	//cout << "\nlibogg 1.3.4";
-	cout << "\nlibtremor lowmem 1.0.2";
-	cout << "\nzlib " << ZLIB_VERSION;
-	cout << "\nlibpng " << PNG_LIBPNG_VER_STRING;
-	//cout << "\nlibjpeg-turbo " << JPEG_LIB_VERSION;
+	//printf("libmad " << MAD_VERSION_MAJOR << "." << MAD_VERSION_MINOR << "." << MAD_VERSION_PATC\nH);
+	//printf("libogg 1.3.4\n");
+	printf("libtremor lowmem 1.0.2\n");
+	printf("zlib " << ZLIB_VERSIO\nN);
+	printf("libpng " << PNG_LIBPNG_VER_STRIN\nG);
+	//printf("libjpeg-turbo " << JPEG_LIB_VERSIO\nN);
 
 	setBackdropColor(ARGB16(1, 29, 29, 29));
 	setBackdropColorSub(ARGB16(1, 29, 29, 29));
@@ -97,7 +97,7 @@ int main(){
 	//check if running on no$gba
 	if (strncmp((char*)0x4FFFA00, "no$gba", 6) == 0) {
 		nocash = true;
-		cout << "\nRunning on no$gba";
+		printf("Running on no$gba\n");
 	}
 
 	//play frame
@@ -140,12 +140,12 @@ void error() {
 bool ddsCheck() {
 	DIR* dir = opendir("/dds");
 	if (!dir) {
-		cout << "\nCan't find dds folder";
-		cout << "\nTrying to create it";
+		printf("Can't find dds folder\n");
+		printf("Trying to create it\n");
 		//mkdir("/dds",777);
 		dir = opendir("/dds"); 
 		if (!dir) {
-			cout << "\nCouldn't create dds folder";
+			printf("Couldn't create dds folder\n");
 			return false;
 		} 
 	}
