@@ -11,11 +11,11 @@ ARM_NONE_EABI_PATH	?= $(WONDERFUL_TOOLCHAIN)/toolchain/gcc-arm-none-eabi/bin/
 # User config
 # ===========
 
-NAME		:= dds
+NAME		:= DivaDS
 
-GAME_TITLE	:= dds
-GAME_SUBTITLE	:= a ddr clone
-GAME_AUTHOR	:= github.com/qgerman2/dds
+GAME_TITLE	:= DivaDS
+GAME_SUBTITLE	:= Project DIVA clone
+GAME_AUTHOR	:= github.com/rocoloco321/diva-ds
 GAME_ICON	:= icon.bmp
 
 # A compile_commands.json file is created if this is set to 1
@@ -52,10 +52,12 @@ DEFINES		:= -DSAMPLE_DEFINE -DSAMPLE_DEFINE_WITH_VALUE=123
 #ARM7ELF		:= $(BLOCKSDS)/sys/arm7/main_core/arm7_dswifi_maxmod.elf
 ARM7ELF		:= $(BLOCKSDS)/sys/arm7/main_core/arm7_maxmod.elf
 
-LIBS		:= -lgbajpeg -lpng -lz -lmm9 -lnds9
+LIBS		:= -lNE -lnflib -lgbajpeg -lpng -lz -lmm9 -lnds9
 LIBDIRS		:= $(BLOCKSDS)/libs/maxmod \
 		   $(BLOCKSDS)/libs/libnds\
-		   $(BLOCKSDSEXT)/gbajpeg
+		   $(BLOCKSDSEXT)/gbajpeg \
+		   $(BLOCKSDSEXT)/nitro-engine \
+		   $(BLOCKSDSEXT)/nflib
 
 # Build artifacts
 # ---------------

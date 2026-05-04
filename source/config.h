@@ -1,6 +1,6 @@
 #pragma once
 
-#define CONFIGPATH "/dds/settings"
+#define CONFIGPATH "/divaDS/settings"
 
 typedef struct {
 	int speed;
