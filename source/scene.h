@@ -16,7 +16,7 @@ typedef struct
     s8 nextScene;
 } scene_manager_t;
 
-typedef int (*process_main_func_t)(void* arg);
+typedef int (*scene_main_func_t)(void* arg);
 typedef void (*scene_init_func_t)(scene_manager_t* sceneManager);
 typedef void (*scene_update_func_t)(scene_manager_t* sceneManager, u32 frameCounter);
 typedef void (*scene_finalize_func_t)(scene_manager_t* sceneManager);
