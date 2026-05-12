@@ -98,14 +98,14 @@ void scene_runScene(scene_manager_t* sceneManager, const scene_def_t* sceneDef)
     do
     {
         updateFadeIn();
-        cothread_yield_irq(IRQ_VBLANK);
+        swiWaitForVBlank();
     }
     while(fadeFrame <= fadeLenght);
     do
     {
         frameCounter++;
         sceneDef->updateFunc(sceneManager, frameCounter);
-        cothread_yield_irq(IRQ_VBLANK);
+        swiWaitForVBlank();
         sceneDef->vblankFunc(sceneManager, frameCounter);
     }
     while(sceneManager->nextScene == -1);
@@ -115,10 +115,10 @@ void scene_runScene(scene_manager_t* sceneManager, const scene_def_t* sceneDef)
         frameCounter++;
         sceneDef->updateFunc(sceneManager, frameCounter);
         updateFadeOut();
-        cothread_yield_irq(IRQ_VBLANK);
+        swiWaitForVBlank();
         sceneDef->vblankFunc(sceneManager, frameCounter);
     }
     while(fadeFrame <= fadeLenght);
     sceneDef->finalizeFunc(sceneManager);
-    cothread_yield_irq(IRQ_VBLANK);
+    swiWaitForVBlank();
 }
