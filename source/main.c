@@ -25,7 +25,12 @@ int main(int argc, char **argv)
     NF_Set2D(0, 0);
     NF_Set2D(1, 0);
     NF_InitTiledBgBuffers();    // Initialize storage buffers
-    consoleDemoInit();
+    
+    initFont();
+    PrintConsole* c = malloc(sizeof(PrintConsole));
+    consoleInit(c, 3, BgType_Text4bpp, BgSize_T_256x256, 2, 0, false, false);
+    consoleSetFont(c, &font);
+
     swiWaitForVBlank();
 
     if(!nitroFSInit(NULL))
@@ -45,6 +50,8 @@ int main(int argc, char **argv)
     config_load();
 
     irqSet(IRQ_VBLANK, vblank_interrupt);
+    free(c);
+
     setBrightness(3, 16);
 
     saveData_init();
