@@ -52,12 +52,11 @@ DEFINES		:= -DSAMPLE_DEFINE -DSAMPLE_DEFINE_WITH_VALUE=123
 #ARM7ELF		:= $(BLOCKSDS)/sys/arm7/main_core/arm7_dswifi_maxmod.elf
 ARM7ELF		:= $(BLOCKSDS)/sys/arm7/main_core/arm7_maxmod.elf
 
-LIBS		:= -lNE -lnflib -lgbajpeg -lpng -lz -lmm9 -lnds9
+LIBS		:= -lNE -lgbajpeg -lpng -lz -lmm9 -lnds9
 LIBDIRS		:= $(BLOCKSDS)/libs/maxmod \
 		   $(BLOCKSDS)/libs/libnds\
 		   $(BLOCKSDSEXT)/gbajpeg \
-		   $(BLOCKSDSEXT)/nitro-engine \
-		   $(BLOCKSDSEXT)/nflib
+		   $(BLOCKSDSEXT)/nitro-engine 
 
 # Build artifacts
 # ---------------

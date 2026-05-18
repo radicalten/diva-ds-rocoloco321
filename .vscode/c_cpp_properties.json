@@ -5,12 +5,17 @@
             "includePath": [
                 "/opt/wonderful/toolchain/gcc-arm-none-eabi/arm-none-eabi/include/**",
                 "/opt/wonderful/toolchain/gcc-arm-none-eabi/arm-none-eabi/include/c++/**",
+                "/opt/blocksds/core/libs/libnds/include/**",
+                "/opt/blocksds/external/nflib/include/**",
+                "/opt/blocksds/external/nitro-engine/include/**",
                 "${workspaceFolder}/**"
             ],
             "defines": [],
             "compilerPath": "/opt/wonderful/toolchain/gcc-arm-none-eabi/bin/arm-none-eabi-gcc",
             "intelliSenseMode": "gcc-arm",
-            "compileCommands": "${workspaceFolder}/compile_commands.json"
+            "compileCommands": [
+                "${workspaceFolder}/compile_commands.json"
+            ]
         }
     ],
     "version": 4

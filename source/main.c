@@ -4,7 +4,6 @@
 #include <font.h>
 #include <fat.h>
 #include <filesystem.h>
-#include <nf_lib.h>
 #include <sys/stat.h>
 #include <sys/dir.h>
 
@@ -22,9 +21,7 @@ void vblank_interrupt()
 int main(int argc, char **argv)
 {
     srand(time(NULL));
-    NF_Set2D(0, 0);
-    NF_Set2D(1, 0);
-    NF_InitTiledBgBuffers();    // Initialize storage buffers
+
     
     initFont();
     PrintConsole* c = malloc(sizeof(PrintConsole));
@@ -44,8 +41,6 @@ int main(int argc, char **argv)
 		printf("Try placing divaDS.nds at root of your sdcard and create a divaDS folder\n");
 		printf("Also check if your sd card is write protected\n");
 	}
-
-    NF_SetRootFolder("NITROFS");
 
     config_load();
 

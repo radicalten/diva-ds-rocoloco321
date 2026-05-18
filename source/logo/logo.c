@@ -1,12 +1,11 @@
 #include <nds.h>
-#include <nf_lib.h>
 
 #include "../scene.h"
 #include "logo.h"
 
 void logo_init(void)
 {
-
+/*
     NF_Set2D(0, 0);
     NF_Set2D(1, 0);
     NF_ResetTiledBgBuffers();
@@ -18,13 +17,15 @@ void logo_init(void)
 
     NF_CreateTiledBg(0, 0, "mainBG0");
     NF_CreateTiledBg(1, 0, "subBG0");
-
+*/
 }
 
 void logo_finalize(void)
 {
+    /*
     NF_DeleteTiledBg(0,0);
     NF_DeleteTiledBg(1,0);
+    */
 }
 
 void logo_render(scene_manager_t* arg, int frameCounter)

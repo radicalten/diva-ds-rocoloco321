@@ -1,5 +1,4 @@
 #include <nds.h>
-#include <nf_lib.h>
 #include <stdlib.h>
 
 #include "../archive.h"
@@ -15,16 +14,40 @@ static title_state_t* sTitleSceneState;
 void title_init(void)
 {
     sTitleSceneState = malloc(sizeof(title_state_t));
+    /*
     NF_Set2D(1,0);
     NF_ResetTiledBgBuffers();
-
+    NF_ResetSpriteBuffers();
+    NF_InitTiledBgSys(0);
+    NF_InitTiledBgSys(1);
+    NF_InitSpriteSys(0);        // Top screen
+    NF_InitSpriteSys(1);        // Bottom screen
+*/
     consoleInit(&sTitleSceneState->console, 3, BgType_Text4bpp, BgSize_T_256x256, 2, 0, false, false);
     consoleSetFont(&sTitleSceneState->console, &font);
-    NF_ShowBg(1,3);
-
 
     sTitleSceneState->bnbl = (jnui_bnbl_res_t*)loadArchive("/scene/Title/test.bnbl");
+/*
+    //NF_LoadTiledBg("/scene/Logo/logo_m_b", "mainBG0", 256, 256);
+    NF_LoadTiledBg("/scene/Title/bg", "subBG0", 256, 256);
 
+    //NF_CreateTiledBg(0, 0, "mainBG0");
+    NF_CreateTiledBg(1, 0, "subBG0");
+
+    NF_LoadSpriteGfx("scene/Title/spr1", 0, 32, 32);
+    NF_LoadSpritePal("scene/Title/spr1", 0);
+    NF_LoadSpriteGfx("scene/Title/spr2", 1, 32, 32);
+    NF_LoadSpritePal("scene/Title/spr2", 1);
+
+    NF_VramSpriteGfx(1,0,0,true);
+    NF_VramSpritePal(1,0,0);
+
+    NF_VramSpriteGfx(1,1,1,true);
+    NF_VramSpritePal(1,1,1);
+
+    NF_CreateSprite(1,0,0,0,32,32);
+    NF_CreateSprite(1,1,1,1,64,64);
+    */
 }
 
 void title_finalize(void)
@@ -51,9 +74,10 @@ void title_render(scene_manager_t* arg, int frameCounter)
         arg->nextScene = SCENE_LOGO;
     }
     printf("Touch Res: %d", touchRes);
+   // NF_SpriteOamSet(1);
 }
 
 void title_vblank(void)
 {
-
+    oamUpdate(&oamSub);
 }
