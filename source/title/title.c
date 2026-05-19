@@ -5,26 +5,34 @@
 #include "../globalData.h"
 #include "../ui/btnLyt.h"
 #include "../ui/jnLytRes.h"
+#include "../main2d.h"
 #include "../scene.h"
 #include "title.h"
 
 static title_state_t* sTitleSceneState;
 
+static display_config_t dispConfig = 
+{
+    MODE_0_2D,
+    MODE_0_2D,
+    VRAM_A_MAIN_BG_0x06000000,
+    VRAM_B_LCD,
+    VRAM_C_SUB_BG_0x06200000,
+    VRAM_D_LCD,
+    VRAM_E_LCD,
+    VRAM_F_LCD,
+    VRAM_G_LCD,
+    VRAM_H_LCD,
+    VRAM_I_LCD,
+};
+
 
 void title_init(void)
 {
     sTitleSceneState = malloc(sizeof(title_state_t));
-    /*
-    NF_Set2D(1,0);
-    NF_ResetTiledBgBuffers();
-    NF_ResetSpriteBuffers();
-    NF_InitTiledBgSys(0);
-    NF_InitTiledBgSys(1);
-    NF_InitSpriteSys(0);        // Top screen
-    NF_InitSpriteSys(1);        // Bottom screen
-*/
+    m2d_loadDisplayConfig(&dispConfig);
     consoleInit(&sTitleSceneState->console, 3, BgType_Text4bpp, BgSize_T_256x256, 2, 0, false, false);
-    consoleSetFont(&sTitleSceneState->console, &font);
+    consoleSetFont(&sTitleSceneState->console, &gFonts.fonts[FONT_CONSOLE]);
 
     sTitleSceneState->bnbl = (jnui_bnbl_res_t*)loadArchive("/scene/Title/test.bnbl");
 /*

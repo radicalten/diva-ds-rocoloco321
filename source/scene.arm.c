@@ -34,7 +34,12 @@ This is where the scene logic is executed:
 After scene_runScene is done executing, the scene manager will go back to the start of it's infinite loop.
 */
 
-scene_manager_t* sceneManager;
+static scene_manager_t sSceneManager = 
+{
+    SCENE_INVALID,
+    SCENE_INVALID,
+    SCENE_INVALID
+};
 
 static const scene_main_func_t sSceneTable[] =
 {
@@ -71,29 +76,22 @@ static void setFadeLenght(int len, int direction)
     fadeFrame = 0;
 }
 
-void scene_init(void)
-{
-    sceneManager = malloc(sizeof(scene_manager_t));
-    sceneManager->currScene = -1;
-    sceneManager->nextScene = SCENE_LOGO;
-    sceneManager->prevScene = -1;
-}
-
 void scene_main(void)
 {
+    sSceneManager.nextScene = SCENE_LOGO;
     while(true)
     {
-        sceneManager->prevScene = sceneManager->currScene;
-        sceneManager->currScene = sceneManager->nextScene;
-        sceneManager->nextScene = -1;
-        sSceneTable[sceneManager->currScene](sceneManager);
+        sSceneManager.prevScene = sSceneManager.currScene;
+        sSceneManager.currScene = sSceneManager.nextScene;
+        sSceneManager.nextScene = SCENE_INVALID;
+        sSceneTable[sSceneManager.currScene]();
     }
 }
 
-void scene_runScene(scene_manager_t* sceneManager, const scene_def_t* sceneDef)
+void scene_runScene(const scene_def_t* sceneDef)
 {
     u32 frameCounter = 0;
-    sceneDef->initFunc(sceneManager);
+    sceneDef->initFunc(&sSceneManager);
     setFadeLenght(sceneDef->fadeInLength, sceneDef->fadeInWhite);
     do
     {
@@ -104,21 +102,21 @@ void scene_runScene(scene_manager_t* sceneManager, const scene_def_t* sceneDef)
     do
     {
         frameCounter++;
-        sceneDef->updateFunc(sceneManager, frameCounter);
+        sceneDef->updateFunc(&sSceneManager, frameCounter);
         swiWaitForVBlank();
-        sceneDef->vblankFunc(sceneManager, frameCounter);
+        sceneDef->vblankFunc(&sSceneManager, frameCounter);
     }
-    while(sceneManager->nextScene == -1);
+    while(sSceneManager.nextScene == SCENE_INVALID);
     setFadeLenght(sceneDef->fadeOutLength, sceneDef->fadeOutWhite);
     do
     {
         frameCounter++;
-        sceneDef->updateFunc(sceneManager, frameCounter);
+        sceneDef->updateFunc(&sSceneManager, frameCounter);
         updateFadeOut();
         swiWaitForVBlank();
-        sceneDef->vblankFunc(sceneManager, frameCounter);
+        sceneDef->vblankFunc(&sSceneManager, frameCounter);
     }
     while(fadeFrame <= fadeLenght);
-    sceneDef->finalizeFunc(sceneManager);
+    sceneDef->finalizeFunc(&sSceneManager);
     swiWaitForVBlank();
 }

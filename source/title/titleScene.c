@@ -24,7 +24,7 @@ static void update(scene_manager_t* sceneManager, u32 frameCounter)
     title_render(sceneManager, frameCounter);
 }
 
-int titlesc_run(scene_manager_t* arg)
+void titlesc_run(void)
 {
     scene_def_t sceneDef =
     {
@@ -37,6 +37,5 @@ int titlesc_run(scene_manager_t* arg)
         false,
         false
     };
-    scene_runScene(sceneManager, &sceneDef);
-    return 0;
+    scene_runScene(&sceneDef);
 }

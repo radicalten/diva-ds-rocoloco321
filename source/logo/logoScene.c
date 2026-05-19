@@ -23,7 +23,7 @@ static void update(scene_manager_t* sceneManager, u32 frameCounter)
     logo_render(sceneManager, frameCounter);
 }
 
-int logosc_run(scene_manager_t* arg)
+void logosc_run(void)
 {
     scene_def_t sceneDef =
     {
@@ -36,6 +36,5 @@ int logosc_run(scene_manager_t* arg)
         true,
         false
     };
-    scene_runScene(sceneManager, &sceneDef);
-    return 0;
+    scene_runScene(&sceneDef);
 }

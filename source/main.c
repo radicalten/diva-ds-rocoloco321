@@ -1,7 +1,6 @@
 #include <nds.h>
 #include <stdio.h>
 #include <time.h>
-#include <font.h>
 #include <fat.h>
 #include <filesystem.h>
 #include <sys/stat.h>
@@ -9,6 +8,7 @@
 
 #include "config.h"
 #include "globalData.h"
+#include "main2d.h"
 #include "saveData.h"
 #include "scene.h"
 #include "main.h"
@@ -22,11 +22,13 @@ int main(int argc, char **argv)
 {
     srand(time(NULL));
 
+    setBackdropColor(RGB15(0, 0, 0));
+    setBackdropColorSub(RGB15(0, 0, 0));
     
-    initFont();
+    m2d_loadFonts();
     PrintConsole* c = malloc(sizeof(PrintConsole));
     consoleInit(c, 3, BgType_Text4bpp, BgSize_T_256x256, 2, 0, false, false);
-    consoleSetFont(c, &font);
+    consoleSetFont(c, &gFonts.fonts[FONT_CONSOLE]);
 
     swiWaitForVBlank();
 
@@ -51,7 +53,6 @@ int main(int argc, char **argv)
 
     saveData_init();
 
-    scene_init();
     scene_main();
 
 }

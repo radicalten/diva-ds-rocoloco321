@@ -2,21 +2,22 @@
 
 typedef enum
 {
-    SCENE_LOGO,
+    SCENE_LOGO = 0,
     SCENE_TITLE,
     SCENE_MENU,
     SCENE_SETTINGS,
-    SCENE_PLAY
+    SCENE_PLAY,
+    SCENE_INVALID = 255
 } DivaScene;
 
 typedef struct
 {
-    s8 currScene;
-    s8 prevScene;
-    s8 nextScene;
+    u8 currScene;
+    u8 prevScene;
+    u8 nextScene;
 } scene_manager_t;
 
-typedef int (*scene_main_func_t)(void* arg);
+typedef void (*scene_main_func_t)(void);
 typedef void (*scene_init_func_t)(scene_manager_t* sceneManager);
 typedef void (*scene_update_func_t)(scene_manager_t* sceneManager, u32 frameCounter);
 typedef void (*scene_finalize_func_t)(scene_manager_t* sceneManager);
@@ -34,8 +35,5 @@ typedef struct
     bool fadeOutWhite;
 } scene_def_t;
 
-extern scene_manager_t* sceneManager;
-
-void scene_init();
 void scene_main();
-void scene_runScene(scene_manager_t* sceneManager, const scene_def_t* sceneDef);
+void scene_runScene(const scene_def_t* sceneDef);
