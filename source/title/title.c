@@ -35,20 +35,16 @@ void title_init(void)
 
     int bg3 = bgInitHidden(3, BgType_Text4bpp, BgSize_T_256x256, 3, 0);
     sTitleSceneState->bg2Ptr = bgInitHidden(2, BgType_Text4bpp, BgSize_T_256x256, 4, 1);
-    sTitleSceneState->bg1Ptr = bgInitHidden(1, BgType_Text4bpp, BgSize_T_512x256, 5, 2);
 
     m2d_initBackground(&sTitleSceneState->bg3, bg3, "/scene/Title/title3_m_b");
     m2d_initBackground(&sTitleSceneState->bg2, sTitleSceneState->bg2Ptr, "/scene/Title/title2_m_b");
     m2d_initBackground(&sTitleSceneState->bg2, sTitleSceneState->bg2Ptr, "/scene/Title/title2_m_b");
-    m2d_initBackground(&sTitleSceneState->bg1, sTitleSceneState->bg1Ptr, "/scene/Title/title1_m_b");
     m2d_initBgPalette(&sTitleSceneState->bgPal, false, "/scene/Title/title_m_b");
     bgSetPriority(bg3, 3);
     bgSetPriority(sTitleSceneState->bg2Ptr, 1);
-    bgSetPriority(sTitleSceneState->bg1Ptr, 2);
     bgShow(bg3);
     bgShow(sTitleSceneState->bg2Ptr);
-    bgShow(sTitleSceneState->bg1Ptr);
-    m2d_setBlendAlpha(BLEND_SRC_BG2, BLEND_DST_BG1 | BLEND_DST_BG3, 9,7);
+    m2d_setBlendAlpha(BLEND_SRC_BG2, BLEND_DST_BG3, 8,8);
 
    // int bg3Sub = bgInitHiddenSub() 
 
@@ -57,7 +53,6 @@ void title_init(void)
 
     sTitleSceneState->bnbl = (jnui_bnbl_res_t*)loadArchive("/scene/Title/test.bnbl");
 
-    sTitleSceneState->currScroll = 0;
 /*
     //NF_LoadTiledBg("/scene/Logo/logo_m_b", "mainBG0", 256, 256);
     NF_LoadTiledBg("/scene/Title/bg", "subBG0", 256, 256);
@@ -93,16 +88,12 @@ void title_finalize(void)
 
 void title_render(scene_manager_t* arg, int frameCounter)
 {
-    sTitleSceneState->currScroll++;
 }
 
 void title_vblank(void)
 {
     fx32 scroll = FX32_TO_FX32_8(FX32_CONST(0.25));
-    fx32 scrollbg1X = FX32_TO_FX32_8(FX32_CONST(0.35));
-    fx32 scrollbg1Y = FX32_TO_FX32_8(sinLerp(degreesToAngle(sTitleSceneState->currScroll)));
     bgScrollf(sTitleSceneState->bg2Ptr, -scroll, scroll);
-    bgScrollf(sTitleSceneState->bg1Ptr, scrollbg1X, scrollbg1Y);
     bgUpdate();
     //oamUpdate(&oamSub);
 }
