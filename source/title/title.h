@@ -7,6 +7,7 @@ typedef struct
     m2d_bg_res_t bg3;
     m2d_bg_res_t bg2;
     m2d_bg_res_t bg3Sub;
+    m2d_bg_res_t bg2Sub;
     m2d_bgPal_res_t bgPal;
     m2d_bgPal_res_t bgPalSub;
     jnui_bnbl_res_t* bnbl;

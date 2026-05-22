@@ -46,6 +46,7 @@ void m2d_loadDisplayConfig(display_config_t* config)
     vramSetBankI(config->vramI);
 }
 
+//TODO:Split this into a load + init functions to allow backgrounds with shared tiles 
 void m2d_initBackground(m2d_bg_res_t* bg,int bgId, const char* path)
 {
     char chrPath[255];

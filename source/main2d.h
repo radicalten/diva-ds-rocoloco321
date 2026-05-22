@@ -57,6 +57,12 @@ inline void m2d_setBlendAlpha(u32 src, u32 dst, u32 evA, u32 evB)
     REG_BLDALPHA = BLDALPHA_EVA(evA) | BLDALPHA_EVB(evB);
 }
 
+inline void m2d_setBlendAlphaSub(u32 src, u32 dst, u32 evA, u32 evB)
+{
+    REG_BLDCNT_SUB = BLEND_ALPHA | src | dst;
+    REG_BLDALPHA_SUB = BLDALPHA_EVA(evA) | BLDALPHA_EVB(evB);
+}
+
 inline void m2d_disableBlendAlpha()
 {
     REG_BLDCNT = 0;
