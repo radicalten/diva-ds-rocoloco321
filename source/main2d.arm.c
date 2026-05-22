@@ -66,7 +66,19 @@ void m2d_initBackground(m2d_bg_res_t* bg,int bgId, const char* path)
         libndsCrash("There was an error loading the screen file!");
     }
     DC_FlushRange(bg->scr.data, bg->scr.size);
-    dmaCopy(bg->scr.data,bgGetMapPtr(bgId), bg->scr.size);
+    if(m2d_getBgSize(bgId) == BgSize_T_512x256) //512x256 requires special handling
+    {
+        int nrLines = div32(bg->scr.size, 0x80);
+        for(int i=0;i<nrLines;i++)
+        {
+            dmaCopy(bg->scr.data + (0x80*i), bgGetMapPtr(bgId) + (0x20*i), 0x40); //map ptr should add 0x40 instead of 0x20 but idk why isn't it doing that
+            dmaCopy(bg->scr.data + 0x40 + (0x80*i), bgGetMapPtr(bgId) + (0x20*i) + 0x400, 0x40);
+        }
+    }
+    else
+    {
+        dmaCopy(bg->scr.data,bgGetMapPtr(bgId), bg->scr.size);
+    }
 }
 
 void m2d_initBgPalette(m2d_bgPal_res_t* file, int screen, const char* path)
