@@ -42,13 +42,14 @@ void* loadArchive(const char* path)
     fp = fopen(path, "rb");
     if(fp != NULL)
     {
-        fseek(fp,0,SEEK_END);
+        if(fseek(fp,0,SEEK_END)!= 0)libndsCrash("FseekError");
         size = ftell(fp);
         rewind(fp);
         data = malloc(size);
         if(data != NULL)
         {
             fread(data,size,1,fp);
+            DC_InvalidateRange(data, size);
         }
         fclose(fp);
     }

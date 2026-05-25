@@ -6,6 +6,13 @@
 
 m2d_fonts_t gFonts;
 
+int objCount = 0;
+int objCountSub = 0;
+int mapMode;
+int mapModeSub;
+OAM_BUFFER_OBJ mainOam[128] = {0};
+OAM_BUFFER_OBJ subOam[128] = {0};
+
 void m2d_getNscExt(char* dst, const char* path)
 {
     sprintf(dst, "%s.nsc.bin", path);
@@ -19,6 +26,11 @@ void m2d_getNcgExt(char* dst, const char* path)
 void m2d_getNclExt(char* dst, const char* path)
 {
     sprintf(dst, "%s.ncl.bin", path);
+}
+
+void m2d_getNceExt(char* dst, const char* path)
+{
+    sprintf(dst, "%s.nce.bin", path);
 }
 
 void m2d_loadFonts()
@@ -102,6 +114,44 @@ void m2d_initBgPalette(m2d_bgPal_res_t* file, int screen, const char* path)
     }
 }
 
+void m2d_loadInitCell(m2d_obj_res_t* res, int screen, const char* path)
+{
+    char chrPath[255];
+    char palPath[255];
+    char objPath[255];
+    m2d_getNcgExt(chrPath, path);
+    m2d_getNclExt(palPath, path);
+    m2d_getNceExt(objPath, path);
+    res->chr = loadArchiveEx(chrPath);
+    if(res->chr.data == NULL)
+    {
+        libndsCrash("There was an error loading the character file!");
+    }
+    res->pal = loadArchiveEx(palPath);
+    if(res->pal.data == NULL)
+    {
+        libndsCrash("There was an error loading the palette file!");
+    }
+    res->obj = loadArchive(objPath);
+    if(res->obj == NULL)
+    {
+        libndsCrash("There was an error loading the cell file!");
+    }
+    
+    DC_FlushRange(res->chr.data, res->chr.size);
+    DC_FlushRange(res->pal.data, res->pal.size);
+    if (!screen)
+    {
+        dmaCopy(res->chr.data, SPRITE_GFX, res->chr.size);
+        dmaCopy(res->pal.data, SPRITE_PALETTE, res->pal.size);
+    }
+    else
+    {
+        dmaCopy(res->chr.data, SPRITE_GFX_SUB, res->chr.size);
+        dmaCopy(res->pal.data, SPRITE_PALETTE_SUB, res->pal.size);       
+    }
+}
+
 void m2d_destroyBackground(m2d_bg_res_t* bg)
 {
     unloadArchiveEx(&bg->chr);
@@ -111,4 +161,103 @@ void m2d_destroyBackground(m2d_bg_res_t* bg)
 void m2d_destroyBgPal(m2d_bgPal_res_t* file)
 {
     unloadArchiveEx(&file->pal);
+}
+
+void m2d_destroyObj(m2d_obj_res_t* res)
+{
+    unloadArchiveEx(&res->chr);
+    unloadArchiveEx(&res->pal);
+    unloadArchive(&res->obj);
+}
+
+void m2d_disableOam(int scr)
+{
+    if (!scr)
+        REG_DISPCNT &= ~DISPLAY_SPR_ACTIVE;
+    else
+        REG_DISPCNT_SUB &= ~DISPLAY_SPR_ACTIVE;
+        
+}
+
+void m2d_enableOam(int scr, int mappingMode)
+{
+    if (!scr)
+    {
+        REG_DISPCNT |= DISPLAY_SPR_ACTIVE | (mappingMode & 0xffffff0);
+        mapMode = mappingMode;
+    }
+    else
+    {
+        REG_DISPCNT_SUB |= DISPLAY_SPR_ACTIVE | (mappingMode & 0xffffff0);
+        mapModeSub = mappingMode;
+    }
+}
+
+
+void m2d_clearOam()
+{
+    objCount = 0;
+    objCountSub = 0;
+    memset(&mainOam, 0, sizeof(mainOam));
+    memset(&subOam, 0, sizeof(subOam));
+}
+
+void m2d_renderCell(CELL* cell, int screen, int x, int y)
+{
+    int i;
+    int nrOam = cell->nObj;
+    if (!screen)
+    {
+        if(objCount + nrOam >= 128)
+        {
+            libndsCrash("The cell no longer fits in the Main OAM Buffer!");
+        }
+        for(i=0;i<nrOam;i++)
+        {
+            memcpy(&mainOam[objCount+i].obj, &cell->obj[i], sizeof(OAM_OBJ));
+            mainOam[objCount+i].obj.x += x + cell->obj[i].x;
+            mainOam[objCount+i].obj.y += y + cell->obj[i].y;
+        }
+        objCount++;
+    }
+    else
+    {
+        if(objCountSub + nrOam >= 128)
+        {
+            libndsCrash("The cell no longer fits in the Sub OAM Buffer!");
+        }
+        for(i=0;i<nrOam;i++)
+        {
+            //subOam[objCountSub+i].obj = cell->obj[i].obj;
+            memcpy(&subOam[objCountSub+i].obj, &cell->obj[i], sizeof(OAM_OBJ));
+            subOam[objCountSub+i].obj.x += x + cell->obj[i].x;
+            subOam[objCountSub+i].obj.y += y + cell->obj[i].y;
+        }
+        objCountSub++;
+    } 
+}
+
+void m2d_prepareBuffers()
+{
+    int i; 
+    DC_FlushRange(&mainOam, sizeof(mainOam));
+    DC_FlushRange(&subOam, sizeof(subOam));
+    for(i=0;i<128-objCount;i++)
+    {
+        mainOam[i+objCount].obj.x = -128;
+        mainOam[i+objCount].obj.y = -32;
+    }
+    for(i=0;i<128-objCountSub;i++)
+    {
+        subOam[i+objCountSub].obj.x = -128;
+        subOam[i+objCountSub].obj.y = -32;
+    }
+}
+
+void m2d_applyBuffers()
+{
+    DC_FlushRange(&mainOam, sizeof(mainOam));
+    DC_FlushRange(&subOam, sizeof(subOam));
+    dmaCopy(&mainOam, OAM, sizeof(mainOam));
+    dmaCopy(&subOam, OAM_SUB, sizeof(subOam));
 }

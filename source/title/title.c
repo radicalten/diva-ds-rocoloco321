@@ -56,9 +56,14 @@ void title_init(void)
     bgShow(bg3Sub);
     bgShow(sTitleSceneState->bg2PtrSub);
     m2d_setBlendAlphaSub(BLEND_SRC_BG2, BLEND_DST_BG3, 8,8);
-   // int bg3Sub = bgInitHiddenSub() 
 
-
+    m2d_clearOam();
+    m2d_prepareBuffers();
+    m2d_enableOam(true, SpriteMapping_1D_32);
+    m2d_loadInitCell(&sTitleSceneState->objSub, true, "/scene/Title/test_s_o");
+    CELL* cell0 = m2d_getCell(sTitleSceneState->objSub.obj, 1);
+    m2d_renderCell(cell0, true, 0,0);
+    m2d_applyBuffers();
     
 
     sTitleSceneState->bnbl = (jnui_bnbl_res_t*)loadArchive("/scene/Title/test.bnbl");
