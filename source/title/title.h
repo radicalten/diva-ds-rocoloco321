@@ -1,6 +1,7 @@
 #pragma once
 #include "../math/fx.h"
 #include "../ui/jnLytRes.h"
+#include "../ui/cellLyt.h"
 #include "../main2d.h"
 typedef struct
 {
@@ -12,6 +13,8 @@ typedef struct
     m2d_bgPal_res_t bgPalSub;
     m2d_obj_res_t objSub;
     jnui_bnbl_res_t* bnbl;
+    jnui_bncl_res_t* bncl;
+    cellLyt_element_t* lyt;
     int state;
     int bg2Ptr; //Returned by InitBG
     int bg2PtrSub;

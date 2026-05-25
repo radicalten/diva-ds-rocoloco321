@@ -120,10 +120,11 @@ void m2d_destroyBgPal(m2d_bgPal_res_t* pal);
 void m2d_destroyObj(m2d_obj_res_t* res);
 void m2d_disableOam(int scr);
 void m2d_enableOam(int scr, int mappingMode);
-void m2d_clearOam();
+void m2d_clearResetOam();
 void m2d_renderCell(CELL* cell, int screen, int x, int y);
 void m2d_prepareBuffers();
 void m2d_applyBuffers();
+void m2d_resetOam();
 
 inline void m2d_setBlendAlpha(u32 src, u32 dst, u32 evA, u32 evB)
 {

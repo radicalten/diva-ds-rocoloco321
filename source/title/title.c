@@ -57,16 +57,12 @@ void title_init(void)
     bgShow(sTitleSceneState->bg2PtrSub);
     m2d_setBlendAlphaSub(BLEND_SRC_BG2, BLEND_DST_BG3, 8,8);
 
-    m2d_clearOam();
-    m2d_prepareBuffers();
+    m2d_clearResetOam();
     m2d_enableOam(true, SpriteMapping_1D_32);
     m2d_loadInitCell(&sTitleSceneState->objSub, true, "/scene/Title/test_s_o");
-    CELL* cell0 = m2d_getCell(sTitleSceneState->objSub.obj, 1);
-    m2d_renderCell(cell0, true, 0,0);
-    m2d_applyBuffers();
-    
-
     sTitleSceneState->bnbl = (jnui_bnbl_res_t*)loadArchive("/scene/Title/test.bnbl");
+    sTitleSceneState->bncl = (jnui_bncl_res_t*)loadArchive("/scene/Title/test.bncl");
+    sTitleSceneState->lyt = cellLyt_init(sTitleSceneState->bncl);
 
 }
 
@@ -78,13 +74,19 @@ void title_finalize(void)
     m2d_destroyBackground(&sTitleSceneState->bg2Sub);
     m2d_destroyBgPal(&sTitleSceneState->bgPal);
     m2d_destroyBgPal(&sTitleSceneState->bgPalSub);
+    m2d_destroyObj(&sTitleSceneState->objSub);
     unloadArchive(sTitleSceneState->bnbl);
+    free(sTitleSceneState->lyt);
     free(sTitleSceneState);
     sTitleSceneState = NULL;
 }
 
 void title_render(scene_manager_t* arg, int frameCounter)
 {
+    m2d_resetOam();
+    cellLyt_setElementPosition(cellLyt_getLytElement(sTitleSceneState->lyt, 0), 192, 0);
+    cellLyt_render(sTitleSceneState->bncl, sTitleSceneState->lyt, sTitleSceneState->objSub.obj, true);
+    m2d_prepareBuffers();
 }
 
 void title_vblank(void)
@@ -93,5 +95,6 @@ void title_vblank(void)
     bgScrollf(sTitleSceneState->bg2Ptr, -scroll, scroll);
     bgScrollf(sTitleSceneState->bg2PtrSub, -scroll, scroll);
     bgUpdate();
+    m2d_applyBuffers();
     //oamUpdate(&oamSub);
 }

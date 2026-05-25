@@ -194,12 +194,18 @@ void m2d_enableOam(int scr, int mappingMode)
 }
 
 
-void m2d_clearOam()
+void m2d_clearResetOam()
 {
     objCount = 0;
     objCountSub = 0;
     memset(&mainOam, 0, sizeof(mainOam));
     memset(&subOam, 0, sizeof(subOam));
+}
+
+void m2d_resetOam()
+{
+    objCount = 0;
+    objCountSub = 0;
 }
 
 void m2d_renderCell(CELL* cell, int screen, int x, int y)
