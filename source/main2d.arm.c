@@ -220,11 +220,12 @@ void m2d_renderCell(CELL* cell, int screen, int x, int y)
         }
         for(i=0;i<nrOam;i++)
         {
-            memcpy(&mainOam[objCount+i].obj, &cell->obj[i], sizeof(OAM_OBJ));
+            mainOam[objCount+i].obj = cell->obj[i].obj;
+            //memcpy(&mainOam[objCount+i].obj, &cell->obj[i], sizeof(OAM_OBJ));
             mainOam[objCount+i].obj.x += x + cell->obj[i].x;
             mainOam[objCount+i].obj.y += y + cell->obj[i].y;
         }
-        objCount++;
+        objCount+=nrOam;
     }
     else
     {
@@ -234,12 +235,12 @@ void m2d_renderCell(CELL* cell, int screen, int x, int y)
         }
         for(i=0;i<nrOam;i++)
         {
-            //subOam[objCountSub+i].obj = cell->obj[i].obj;
-            memcpy(&subOam[objCountSub+i].obj, &cell->obj[i], sizeof(OAM_OBJ));
-            subOam[objCountSub+i].obj.x += x + cell->obj[i].x;
-            subOam[objCountSub+i].obj.y += y + cell->obj[i].y;
+            subOam[objCountSub+i].obj = cell->obj[i].obj;
+            //memcpy(&subOam[objCountSub+i].obj, &cell->obj[i], sizeof(OAM_OBJ));
+            subOam[objCountSub+i].obj.x += x;
+            subOam[objCountSub+i].obj.y += y;
         }
-        objCountSub++;
+        objCountSub+=nrOam; //:facepalm: wrong operation dumbass
     } 
 }
 

@@ -59,9 +59,9 @@ void title_init(void)
 
     m2d_clearResetOam();
     m2d_enableOam(true, SpriteMapping_1D_32);
-    m2d_loadInitCell(&sTitleSceneState->objSub, true, "/scene/Title/test_s_o");
-    sTitleSceneState->bnbl = (jnui_bnbl_res_t*)loadArchive("/scene/Title/test.bnbl");
-    sTitleSceneState->bncl = (jnui_bncl_res_t*)loadArchive("/scene/Title/test.bncl");
+    m2d_loadInitCell(&sTitleSceneState->objSub, true, "/scene/Title/title_s_o");
+    sTitleSceneState->bnbl = (jnui_bnbl_res_t*)loadArchive("/scene/Title/title.bnbl");
+    sTitleSceneState->bncl = (jnui_bncl_res_t*)loadArchive("/scene/Title/title.bncl");
     sTitleSceneState->lyt = cellLyt_init(sTitleSceneState->bncl);
 
 }
@@ -84,7 +84,6 @@ void title_finalize(void)
 void title_render(scene_manager_t* arg, int frameCounter)
 {
     m2d_resetOam();
-    cellLyt_setElementPosition(cellLyt_getLytElement(sTitleSceneState->lyt, 0), 192, 0);
     cellLyt_render(sTitleSceneState->bncl, sTitleSceneState->lyt, sTitleSceneState->objSub.obj, true);
     m2d_prepareBuffers();
 }
@@ -96,5 +95,4 @@ void title_vblank(void)
     bgScrollf(sTitleSceneState->bg2PtrSub, -scroll, scroll);
     bgUpdate();
     m2d_applyBuffers();
-    //oamUpdate(&oamSub);
 }

@@ -81,6 +81,7 @@ void scene_main(void)
     sSceneManager.nextScene = SCENE_LOGO;
     while(true)
     {
+        if(sSceneManager.nextScene == SCENE_EXIT) break; 
         sSceneManager.prevScene = sSceneManager.currScene;
         sSceneManager.currScene = sSceneManager.nextScene;
         sSceneManager.nextScene = SCENE_INVALID;

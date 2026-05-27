@@ -7,6 +7,7 @@ typedef enum
     SCENE_MENU,
     SCENE_SETTINGS,
     SCENE_PLAY,
+    SCENE_EXIT,
     SCENE_INVALID = 255
 } DivaScene;
 
