@@ -196,6 +196,223 @@ I can confirm that I am seeing this with a gfortran-compiled code which uses a 6
 
 The error message is very confusing, of course, this is rather weird that a large static area breaks linking.
 
+prompt to Gemini 3.5 flash and GLM 5.2 (max):
+Does the C code have any large static data structures (2GB or more)? The apple dev website says that can cause this warning
+
+Gemini 3.5 Flash reply: 
+
+Yes, absolutely! You hit the nail on the head.
+
+The C code has a massive static data structure that is over 6.4 Gigabytes in size.
+
+When you compile this program, the compiler places this 6.4 GB array into the executable's __BSS segment (the region reserved for uninitialized global variables). When macOS launches the app, dyld is forced to find and reserve a contiguous 6.4 GB block of virtual memory before the program's main() function even begins.
+
+On macOS (especially under Rosetta 2 or inside GitHub's runner environments), the operating system blocks this gigantic reservation request, causing the syscall to map cache into shared region failed error.
+The Math (Where the 6.4 GB is hiding)
+
+Look at these definitions in your C file:
+
+C
+
+#define MAX_CHARTS       32
+#define MAX_NOTES        65536   // <-- This is extremely large for one chart!
+#define MAX_COLS         10
+
+    sizeof(NoteRow) is 8 (double) + 10 (chars) + padding = 24 bytes.
+    sizeof(Chart) contains notes[65536] of NoteRow.
+        65,536×24 bytes≈1.57 MB65,536×24 bytes≈1.57 MB per chart.
+    sizeof(Song) contains charts[32] of Chart.
+        32×1.57 MB≈50.3 MB32×1.57 MB≈50.3 MB per song.
+    g_songs[128] is a global static array of Song:
+        128×50.3 MB≈6.44 Gigabytes!128×50.3 MB≈6.44 Gigabytes!
+
+How to Fix It
+
+You can easily fix this by doing two things:
+
+    Reduce the limits to realistic numbers (DDR songs rarely have more than 5,000 notes).
+    Dynamically allocate the song array at runtime using the heap (malloc/calloc), so the binary footprint starts at 0 bytes.
+
+Here are the code changes to make in your C file:
+Step 1: Reduce MAX_NOTES
+
+A 10-minute long DDR song has around 4,000 notes. 65,536 is overkill. Change MAX_NOTES from 65536 to 8192 at the top of your file:
+
+C
+
+#define MAX_NOTES        8192   /* Reduced from 65536 */
+
+(This immediately reduces the memory footprint from 6.4 GB to a much safer 800 MB).
+Step 2: Change static array to dynamic pointer
+
+Find this line in your global variables:
+
+C
+
+/* Song browser */
+static Song   g_songs[128];
+
+Change it to a pointer:
+
+C
+
+/* Song browser */
+static Song   *g_songs = NULL;
+
+Step 3: Allocate the memory inside main
+
+Find your main function and allocate the memory right at the start:
+
+C
+
+int main(int argc, char *argv[]) {
+    /* Allocate song database dynamically */
+    g_songs = calloc(128, sizeof(Song));
+    if (!g_songs) {
+        fprintf(stderr, "Fatal error: Out of memory for song database.\n");
+        return 1;
+    }
+
+    /* Setup */
+    signal(SIGINT,  handle_signal);
+    ...
+
+Step 4: Free the memory at the end of main
+
+Right at the very end of your main function (just before return 0;), free the memory:
+
+C
+
+    /* Cleanup */
+    printf("\033[?47l"); /* restore screen */
+    cursor_show();
+    clear_screen();
+    term_restore();
+    move_to(1, 1);
+    printf(COL_RESET);
+    printf("Thanks for playing! ♪\n");
+    
+    free(g_songs); // <-- Add this line
+    return 0;
+}
+
+Why this fixes the issue:
+
+Because C arrays and pointers use the exact same syntax (e.g. g_songs[i]), you do not need to rewrite any other part of your code.
+
+By allocating the memory dynamically via calloc, the application's launch size drops to almost 0 bytes. dyld will load the application instantly, and macOS will easily hand the program the memory it needs on-demand once it is already running.
+
+
+Does the C code have any large static data structures (2GB or more)? The apple dev website says that can cause this warning
+GLM 5.2 (max) reply: 
+
+You absolutely nailed it. Great catch reading the Apple developer documentation.
+
+Yes, your code does have a massive static data structure, and it is ~6.4 Gigabytes in size. This is exactly what is causing dyld to crash on macOS.
+The Math Behind the 6.4 GB
+
+Look at your global variables and data structures:
+
+    static Song g_songs[128];
+    Inside Song, you have Chart charts[MAX_CHARTS]; where MAX_CHARTS is 32.
+    Inside Chart, you have NoteRow notes[MAX_NOTES]; where MAX_NOTES is 65536.
+    NoteRow contains a double (8 bytes) and a char[10] (10 bytes). With standard padding, a single NoteRow is 24 bytes.
+
+So, let's calculate the size of one Song:
+65536 notes * 24 bytes * 32 charts = 50,331,648 bytes (~48 MB)
+
+Now multiply that by the global array:
+48 MB * 128 songs = 6,442,450,944 bytes (~6 GB)
+
+Because g_songs is declared as a static global array, the compiler puts all 6.4 GB into the Binary's BSS segment (uninitialized static memory). When dyld tries to load your binary, it tries to map 6.4 GB of memory immediately. macOS has strict limits on shared memory regions, and dyld completely chokes on it, throwing the exact syscall error you saw.
+
+Interestingly, Linux might have silently let this slide using "overcommit" (promising the memory exists but not actually assigning physical RAM to it until written to), which is why you didn't hit this error until trying to run it on macOS.
+The Fix: Dynamic Memory Allocation
+
+You should never keep multi-gigabyte arrays in static memory. Because most charts don't actually have 65,536 notes, we can change notes to a dynamically allocated pointer and only allocate the memory we actually need when parsing the chart.
+
+This drops your static memory footprint from 6.4 GB down to less than 1 Megabyte.
+
+Here are the three small changes you need to make to your code:
+1. Change the Chart struct definition
+
+Remove the static array and replace it with a pointer.
+
+C
+
+typedef struct {
+    char   stepstype[32];    /* dance-single, dance-double, etc. */
+    char   description[128];
+    char   difficulty[MAX_DIFF];
+    int    meter;
+    int    numcols;
+    NoteRow *notes;          /* <--- CHANGED FROM ARRAY TO POINTER */
+    int    note_count;
+} Chart;
+
+2. Allocate the memory in parse_notes_block
+
+At the very beginning of your parse_notes_block function, allocate the memory dynamically using calloc. calloc is great here because it zeroes out the memory, mimicking the static array behavior you had before.
+
+C
+
+static void parse_notes_block(Chart *chart, const char *data) {
+    chart->note_count = 0;
+    
+    /* Allocate memory for notes dynamically up to MAX_NOTES */
+    chart->notes = calloc(MAX_NOTES, sizeof(NoteRow));
+    if (!chart->notes) {
+        return; /* Allocation failed */
+    }
+
+    const char *p = data;
+    int   measure  = 0;
+    
+    /* ... The rest of your function remains exactly the same ... */
+
+3. (Optional but recommended) Free the memory
+
+Since you are now using the heap, it's good practice to free the notes when you are done with them to avoid memory leaks (especially since your song scanner might skip songs).
+
+In your scan_dir function, when a song fails to parse or has no charts, free the notes:
+
+C
+
+if (ok && (s->chart_count > 0)) {
+    if (!s->title[0]) strncpy(s->title, ent->d_name, MAX_TITLE-1);
+    g_song_count++;
+} else {
+    /* Free any allocated notes if the song is rejected */
+    for (int i = 0; i < s->chart_count; i++) {
+        if (s->charts[i].notes) free(s->charts[i].notes);
+    }
+}
+
+And at the very end of your main() function before returning, clean up all loaded songs:
+
+C
+
+    /* Cleanup */
+    for (int i = 0; i < g_song_count; i++) {
+        for (int j = 0; j < g_songs[i].chart_count; j++) {
+            if (g_songs[i].charts[j].notes) {
+                free(g_songs[i].charts[j].notes);
+            }
+        }
+    }
+
+    printf("\033[?47l"); /* restore screen */
+    cursor_show();
+    /* ... rest of your cleanup ... */
+    return 0;
+}
+
+Why this fixes everything
+
+By making this change, dyld will only have to map a few kilobytes of static memory when launching the game. The 6.4 GB of potential memory will only be requested from the operating system in tiny chunks (a few kilobytes per chart) as songs are actually loaded into the song select wheel.
+
+Make these changes, recompile on GitHub, and your game will run flawlessly on macOS!
+
 */
 
 #include <stdio.h>
