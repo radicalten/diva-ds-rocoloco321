@@ -1,0 +1,312 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <termios.h>
+#include <sys/time.h>
+#include <signal.h>
+#include <ctype.h>
+#include <math.h>
+
+#define MAX_NOTES 20000
+#define RECEPTOR_ROW 4
+#define SPAWN_ROW 24
+#define FIELD_HEIGHT 20
+
+typedef struct {
+    double time;
+    int col;
+    int hit;
+    int active;
+} Note;
+
+typedef struct {
+    char title[256];
+    double bpm;
+    double offset;
+    Note notes[MAX_NOTES];
+    int note_count;
+} Song;
+
+// Global for terminal restoration
+struct termios orig_termios;
+
+void cleanup_terminal() {
+    tcsetattr(0, TCSANOW, &orig_termios);
+    printf("\033[?25h\n"); // Show cursor
+    printf("\033[0m\n");   // Reset colors
+}
+
+void handle_sigint(int sig) {
+    (void)sig;
+    exit(1);
+}
+
+void setup_terminal() {
+    tcgetattr(0, &orig_termios);
+    struct termios raw = orig_termios;
+    raw.c_lflag &= ~(ECHO | ICANON);
+    raw.c_cc[VMIN] = 0;
+    raw.c_cc[VTIME] = 0;
+    tcsetattr(0, TCSANOW, &raw);
+    printf("\033[?25l"); // Hide cursor
+    printf("\033[2J");   // Clear screen
+    atexit(cleanup_terminal);
+    signal(SIGINT, handle_sigint);
+}
+
+double get_time() {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec + tv.tv_usec / 1000000.0;
+}
+
+void parse_sm(const char* filename, Song* song) {
+    FILE* f = fopen(filename, "r");
+    if (!f) {
+        printf("Failed to open file: %s\n", filename);
+        exit(1);
+    }
+
+    song->note_count = 0;
+    song->bpm = 0;
+    song->offset = 0;
+    strcpy(song->title, "Unknown");
+
+    char line[1024];
+    int in_notes = 0;
+    int measure_num = 0;
+    int lines_in_measure = 0;
+    char measure_rows[256][16];
+
+    while (fgets(line, sizeof(line), f)) {
+        char* p = line;
+        while (isspace(*p)) p++;
+
+        // Strip comments
+        char* comment = strstr(p, "//");
+        if (comment) *comment = '\0';
+
+        if (!in_notes) {
+            if (strncmp(p, "#TITLE:", 7) == 0) {
+                sscanf(p, "#TITLE:%[^;];", song->title);
+            } else if (strncmp(p, "#BPMS:", 6) == 0) {
+                char* eq = strchr(p, '=');
+                if (eq) song->bpm = atof(eq + 1);
+            } else if (strncmp(p, "#OFFSET:", 8) == 0) {
+                char* val = strchr(p, ':');
+                if (val) song->offset = atof(val + 1);
+            } else if (strncmp(p, "#NOTES:", 7) == 0 || strncmp(p, "#NOTEDATA:", 10) == 0) {
+                in_notes = 1;
+                measure_num = 0;
+                lines_in_measure = 0;
+            }
+        } else {
+            if (strchr(p, ':')) continue; // Skip metadata lines inside NOTES
+
+            char temp[64];
+            strcpy(temp, p);
+            char* comma = strchr(temp, ',');
+            if (comma) *comma = '\0';
+            char* semi = strchr(temp, ';');
+            if (semi) *semi = '\0';
+            
+            char* end = temp + strlen(temp) - 1;
+            while(end > temp && isspace(*end)) end--;
+            *(end + 1) = '\0';
+
+            if (strlen(temp) >= 4 && (isdigit(temp[0]) || temp[0] == 'M')) {
+                if (lines_in_measure < 256) {
+                    strncpy(measure_rows[lines_in_measure], temp, 16);
+                    lines_in_measure++;
+                }
+            }
+
+            if (strchr(p, ',') || strchr(p, ';')) {
+                double beat_offset = measure_num * 4.0;
+                for (int i = 0; i < lines_in_measure; i++) {
+                    double beat = beat_offset + (4.0 * i / lines_in_measure);
+                    double time = song->offset + beat * (60.0 / song->bpm);
+                    for (int c = 0; c < 4; c++) {
+                        char nc = measure_rows[i][c];
+                        if (nc == '1' || nc == '2' || nc == '4') {
+                            if (song->note_count < MAX_NOTES) {
+                                Note n = {time, c, 0, 1};
+                                song->notes[song->note_count++] = n;
+                            }
+                        }
+                    }
+                }
+                measure_num++;
+                lines_in_measure = 0;
+                if (strchr(p, ';')) in_notes = 0;
+            }
+        }
+    }
+    fclose(f);
+}
+
+int main(int argc, char* argv[]) {
+    if (argc < 2) {
+        printf("Usage: %s <file.sm|file.ssc>\n", argv[0]);
+        return 1;
+    }
+
+    Song song;
+    parse_sm(argv[1], &song);
+
+    if (song.note_count == 0) {
+        printf("No notes found in file.\n");
+        return 1;
+    }
+
+    setup_terminal();
+
+    int score = 0;
+    int combo = 0;
+    int max_combo = 0;
+    char judgment[16] = "";
+    double judgment_timer = 0;
+    double receptor_flash[4] = {0, 0, 0, 0};
+
+    double start_time = get_time() + 3.0; // 3 second countdown
+
+    const char* colors[] = {"\033[1;31m", "\033[1;34m", "\033[1;33m", "\033[1;32m"};
+    const char* symbols[] = {"<", "v", "^", ">"};
+
+    while (1) {
+        double song_time = get_time() - start_time;
+        double now = get_time();
+
+        // Input Handling
+        char c;
+        while (read(0, &c, 1) > 0) {
+            if (c == 'q') {
+                exit(0);
+            }
+            int col = -1;
+            if (c == 'd') col = 0;
+            if (c == 'f') col = 1;
+            if (c == 'j') col = 2;
+            if (c == 'k') col = 3;
+
+            if (col != -1) {
+                receptor_flash[col] = now;
+                int best_note = -1;
+                double best_diff = 0.18; // Hit window
+
+                for (int i = 0; i < song.note_count; i++) {
+                    if (song.notes[i].col == col && song.notes[i].active && !song.notes[i].hit) {
+                        double diff = fabs(song.notes[i].time - song_time);
+                        if (diff < best_diff) {
+                            best_diff = diff;
+                            best_note = i;
+                        }
+                    }
+                }
+
+                if (best_note != -1) {
+                    song.notes[best_note].hit = 1;
+                    song.notes[best_note].active = 0;
+                    if (best_diff < 0.04) { score += 1000; combo++; strcpy(judgment, "PERFECT"); }
+                    else if (best_diff < 0.08) { score += 600; combo++; strcpy(judgment, "GREAT"); }
+                    else if (best_diff < 0.12) { score += 300; combo++; strcpy(judgment, "GOOD"); }
+                    else { combo = 0; strcpy(judgment, "BAD"); }
+                    judgment_timer = now;
+                    if (combo > max_combo) max_combo = combo;
+                }
+            }
+        }
+
+        // Miss checking
+        for (int i = 0; i < song.note_count; i++) {
+            if (song.notes[i].active && !song.notes[i].hit) {
+                if (song.notes[i].time < song_time - 0.18) {
+                    song.notes[i].active = 0;
+                    combo = 0;
+                    strcpy(judgment, "MISS");
+                    judgment_timer = now;
+                }
+            }
+        }
+
+        // End condition
+        if (song_time > song.notes[song.note_count - 1].time + 3.0) {
+            break;
+        }
+
+        // Rendering
+        char buf[8192];
+        int len = 0;
+        len += sprintf(buf + len, "\033[H"); // Move cursor to top left
+
+        // Header
+        len += sprintf(buf + len, "\033[1;1H\033[0m StepMania Terminal - %.40s", song.title);
+        len += sprintf(buf + len, "\033[2;1H\033[0m Score: %-8d  Combo: %-4d", score, combo);
+        
+        // Clear Field
+        for (int y = 4; y <= 24; y++) {
+            len += sprintf(buf + len, "\033[%d;1H             ", y);
+        }
+
+        // Receptors
+        len += sprintf(buf + len, "\033[%d;1H", RECEPTOR_ROW);
+        for (int i = 0; i < 4; i++) {
+            if (now - receptor_flash[i] < 0.1) {
+                len += sprintf(buf + len, "%s[@]\033[0m ", colors[i]);
+            } else {
+                len += sprintf(buf + len, "%s[ ]\033[0m ", colors[i]);
+            }
+        }
+
+        // Arrows
+        for (int i = 0; i < song.note_count; i++) {
+            if (song.notes[i].active) {
+                double time_until_hit = song.notes[i].time - song_time;
+                if (time_until_hit > -0.2 && time_until_hit < 2.5) {
+                    double progress = (2.5 - time_until_hit) / 2.5;
+                    int y = (int)(SPAWN_ROW - progress * FIELD_HEIGHT);
+                    if (y >= RECEPTOR_ROW + 1 && y <= SPAWN_ROW) {
+                        int col = song.notes[i].col;
+                        int x = col * 4 + 1;
+                        len += sprintf(buf + len, "\033[%d;%dH%s %s\033[0m", y, x, colors[col], symbols[col]);
+                    }
+                }
+            }
+        }
+
+        // Judgment & Combo display
+        if (now - judgment_timer < 0.5) {
+            len += sprintf(buf + len, "\033[7;1H\033[1m   %s   \033[0m", judgment);
+            if (combo > 0) {
+                len += sprintf(buf + len, "\033[8;3H\033[1m%d Combo\033[0m", combo);
+            }
+        }
+
+        // Countdown
+        if (song_time < 0) {
+            len += sprintf(buf + len, "\033[15;1H\033[1m  Get Ready... %d\033[0m", (int)(-song_time) + 1);
+        }
+
+        // Controls
+        len += sprintf(buf + len, "\033[28;1H\033[0m[d] Left  [f] Down  [j] Up  [k] Right  [q] Quit");
+
+        write(1, buf, len);
+        usleep(10000); // 100 FPS cap to prevent CPU hogging
+    }
+
+    // Final Screen
+    printf("\033[2J\033[H");
+    printf("=== Song Complete ===\n");
+    printf("Title: %s\n", song.title);
+    printf("Final Score: %d\n", score);
+    printf("Max Combo: %d\n", max_combo);
+    printf("\nPress Enter to exit...\n");
+    
+    // Restore terminal temporarily to wait for enter
+    tcsetattr(0, TCSANOW, &orig_termios);
+    printf("\033[?25h"); // Show cursor
+    getchar();
+
+    return 0;
+}
