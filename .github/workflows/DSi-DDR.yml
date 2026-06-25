@@ -6,7 +6,7 @@ on:
 jobs:
   build-nds:
     runs-on: ubuntu-latest
-    container: ghcr.io/blocksds/toolchain:latest
+    container: devkitpro/devkitarm:latest
     steps:
     - name: Checkout
       uses: actions/checkout@v6
