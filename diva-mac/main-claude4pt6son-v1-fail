@@ -170,6 +170,32 @@ cc -O2 -o ddr stepmania.c -lm
     You can raise this issue with your tool’s vendor via their support channel.
 Honestly, I recommend the latter. As I said above, you can’t be the first of their customers to hit this.
 
+#Well, I have written the simplest program to describe the problem: 7 lines of fortran!
+
+	      parameter (n=267500000)
+	      real*8 x(n)
+	c      common /bid/ x
+	c
+	      do i=1,n
+	        x(i)=i
+	      enddo
+	      print*,x(n)
+	      end
+
+n=267500000 is the limit I found by trial an error. It is 1.993 GB. This program works, while it fails with n=267600000 (1.9938 GB)
+
+    dyld[41138]: dyld cache '(null)' not loaded: syscall to map cache into shared region failed dyld[41138]: Library not loaded: /usr/lib/libSystem.B.dylib Referenced from: <2B29D6C7-6D46-3945-9ABD-055CC298981B> /Users/jouve/Test_mem/testmem Reason: tried: '/usr/lib/libSystem.B.dylib' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/usr/lib/libSystem.B.dylib' (no such file), '/usr/lib/libSystem.B.dylib' (no such file, no dyld cache), '/usr/local/lib/libSystem.B.dylib' (no such file)
+
+Putting the big array in a common zone (which is commented here) is a classical way to avoid the limits on stack size, but does not change anything here.
+
+The line "print" is only there to avoid smart compilers to "optimize" the whole program and reduce it to nothing if they find out that this piece of code does nothing at all :)
+
+Of course it works on old Mac-intels and linux computers with any value of "n".
+
+I can confirm that I am seeing this with a gfortran-compiled code which uses a 6GB static area, run on an M1 with a recent macOS (Darwin Kernel 23.2.0 as I can see in the terminal - it's a remote login, I have no idea how to convert it into the usual Apple OS names/version). Lowering it to 1GB fixes the issue, although that's of course not a real fix. It seems that the only way out is to use dynamic memory allocation instead, which is, in case of Fortran 77, MALLOC, and ALLOCATE for later Fortran dialects.
+
+The error message is very confusing, of course, this is rather weird that a large static area breaks linking.
+
 */
 
 #include <stdio.h>
