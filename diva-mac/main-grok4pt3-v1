@@ -1,0 +1,189 @@
+/*
+
+Not salvagable. arrows scroll the wrong way, points and combo are not properly tracked, just pressing the button gives you points infinitely
+ui is no so good. 
+
+*/
+
+/* stepterm.c - Elegant single-file StepMania terminal client
+ * gcc -std=c11 -O2 -o stepterm stepterm.c
+ * ./stepterm song.sm   or   ./stepterm song.ssc
+ * Controls: ←↓↑→ (or hjkl)  ESC to quit
+ * Works on macOS Terminal / iTerm2 (ANSI + termios)
+ */
+
+#define _POSIX_C_SOURCE 200809L
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <termios.h>
+#include <sys/time.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <math.h>
+
+#define COLS 4
+#define FIELD_H 22
+#define FIELD_W 29
+#define FPS 60
+#define NOTE_SPEED 0.8   /* seconds to cross screen */
+
+static struct termios orig_term;
+static void restore_term(void) { tcsetattr(0, TCSANOW, &orig_term); }
+
+static void raw_term(void) {
+    tcgetattr(0, &orig_term);
+    atexit(restore_term);
+    struct termios t = orig_term;
+    t.c_lflag &= ~(ICANON | ECHO);
+    t.c_cc[VMIN] = 0; t.c_cc[VTIME] = 0;
+    tcsetattr(0, TCSANOW, &t);
+}
+
+/* ANSI helpers */
+#define CSI "\033["
+#define HOME CSI "H"
+#define CLEAR CSI "2J" HOME
+#define HIDE CSI "?25l"
+#define SHOW CSI "?25h"
+#define FG(r,g,b) CSI "38;2;" #r ";" #g ";" #b "m"
+#define BG(r,g,b) CSI "48;2;" #r ";" #g ";" #b "m"
+#define RESET CSI "0m"
+
+typedef struct {
+    double beat;
+    uint8_t mask;   /* bit 0=left, 1=down, 2=up, 3=right */
+} Note;
+
+typedef struct {
+    char title[128], artist[128];
+    double bpm;
+    Note *notes;
+    size_t nnotes;
+} Chart;
+
+static int parse_sm_ssc(const char *path, Chart *c) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    char line[512], *p;
+    double bpm = 120.0;
+    size_t cap = 256, n = 0;
+    Note *notes = malloc(cap * sizeof(Note));
+
+    while (fgets(line, sizeof line, f)) {
+        if ((p = strstr(line, "#TITLE:"))) sscanf(p+7, "%127[^;]", c->title);
+        if ((p = strstr(line, "#ARTIST:"))) sscanf(p+8, "%127[^;]", c->artist);
+        if ((p = strstr(line, "#BPM:"))) sscanf(p+5, "%lf", &bpm);
+        if ((p = strstr(line, "#NOTES:")) || strstr(line, "#NOTEDATA:")) {
+            /* very naive parser: look for measure blocks */
+            int measure = 0;
+            while (fgets(line, sizeof line, f) && line[0] != ';') {
+                if (line[0] == ',' || line[0] == ';') { measure++; continue; }
+                if (strlen(line) < 4) continue;
+                double beat = measure + (line[0] >= '0' && line[0] <= '9' ? 0 : 0); /* simplistic */
+                uint8_t m = 0;
+                if (line[0] != '0') m |= 1;
+                if (line[1] != '0') m |= 2;
+                if (line[2] != '0') m |= 4;
+                if (line[3] != '0') m |= 8;
+                if (m && n < cap) {
+                    notes[n].beat = measure * 4.0 + (n % 4); /* crude timing */
+                    notes[n++].mask = m;
+                }
+            }
+        }
+    }
+    c->bpm = bpm;
+    c->notes = notes;
+    c->nnotes = n;
+    fclose(f);
+    return 1;
+}
+
+static void draw_frame(const Chart *c, double now, double start, int score, int combo) {
+    double beat = (now - start) * (c->bpm / 60.0);
+    printf(CLEAR HIDE);
+
+    /* Header */
+    printf(FG(200,200,255) "  ╭" "─────────────────────────────" "╮\n");
+    printf("  │ " FG(255,255,180) "%-27s" FG(200,200,255) " │\n", c->title);
+    printf("  │ " FG(180,220,255) "%-27s" FG(200,200,255) " │\n", c->artist);
+    printf("  ╰" "─────────────────────────────" "╯" RESET "\n");
+
+    /* Playfield */
+    printf("  ┌" "────┬────┬────┬────" "┐\n");
+    for (int y = 0; y < FIELD_H; y++) {
+        printf("  │");
+        for (int x = 0; x < COLS; x++) {
+            bool hit = false;
+            double target_beat = beat + (FIELD_H - 1 - y) * (NOTE_SPEED * c->bpm / 60.0);
+            for (size_t i = 0; i < c->nnotes; i++) {
+                if (fabs(c->notes[i].beat - target_beat) < 0.15 &&
+                    (c->notes[i].mask & (1u << x))) {
+                    hit = true; break;
+                }
+            }
+            if (hit) {
+                const char *sym[] = {"←","↓","↑","→"};
+                printf(FG(255,120,120) " " FG(255,255,0) "%s " RESET "│", sym[x]);
+            } else {
+                printf("    │");
+            }
+        }
+        printf("\n");
+    }
+    printf("  └" "────┴────┴────┴────" "┘\n");
+
+    /* Footer */
+    printf(FG(120,255,180) "  Score: %-8d   Combo: %d" RESET "\n", score, combo);
+    printf(HOME);
+    fflush(stdout);
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        fprintf(stderr, "Usage: %s file.sm|file.ssc\n", argv[0]);
+        return 1;
+    }
+    Chart chart = {0};
+    if (!parse_sm_ssc(argv[1], &chart)) {
+        fprintf(stderr, "Failed to parse %s\n", argv[1]);
+        return 1;
+    }
+
+    raw_term();
+    printf(CLEAR);
+
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    double start = tv.tv_sec + tv.tv_usec / 1e6;
+    int score = 0, combo = 0;
+    int last_key = 0;
+
+    for (;;) {
+        gettimeofday(&tv, NULL);
+        double now = tv.tv_sec + tv.tv_usec / 1e6;
+        draw_frame(&chart, now, start, score, combo);
+
+        char ch;
+        if (read(0, &ch, 1) == 1) {
+            if (ch == 27) break; /* ESC */
+            uint8_t mask = 0;
+            if (ch == 'h' || ch == 68) mask = 1;   /* left */
+            if (ch == 'j' || ch == 66) mask = 2;   /* down */
+            if (ch == 'k' || ch == 65) mask = 4;   /* up */
+            if (ch == 'l' || ch == 67) mask = 8;   /* right */
+            if (mask) {
+                score += 100;
+                combo++;
+                last_key = mask;
+            }
+        }
+        usleep(1000000 / FPS);
+    }
+    printf(SHOW CLEAR);
+    restore_term();
+    free(chart.notes);
+    return 0;
+}
