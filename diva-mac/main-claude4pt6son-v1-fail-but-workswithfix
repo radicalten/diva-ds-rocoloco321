@@ -1,3 +1,10 @@
+//reducing note count from 65536 to 4096 fixes the issue. 
+//problem is that Apple Silicon cannot allocate static arrays larger than 2GB (1.99GB) https://developer.apple.com/forums/thread/722360
+//with 65536 notes, apparently that means each song is 50MB in size with 128 songs available 50*128 = 6.4GB
+//Reducing to 4096 = 400MB, which ran fine
+//issues with this version are: arrows flow wrong direction. has a neat light up color bar when notes are pressed
+//essentially it looks like the gemini 4.5 flash version but with 800 extra LOC, not sure what those are doing. 
+
 /* Stepmania c prompt v1 6-24-26
 Create a single file stepmania program in C without external dependencies that updates all its graphics in place. It should accept both .sm and .ssc files and work in the Mac Terminal. The UI should be elegant. 
 Model: Claude 4.6 Sonnet; initial release 2-17-26
