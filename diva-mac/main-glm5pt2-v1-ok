@@ -1,3 +1,18 @@
+/* Stepmania c prompt v1 6-24-26
+Create a single file stepmania program in C without external dependencies that updates all its graphics in place. It should accept both .sm and .ssc files and work in the Mac Terminal. The UI should be elegant. 
+Model: GLM 5.2 (max)
+Here is a complete, single-file C program that implements a StepMania-style rhythm game in the macOS Terminal. It parses both .sm and .ssc file formats, renders the UI in place using ANSI escape codes, and handles raw terminal input for low-latency gameplay.
+Features
+    Universal Parser: Automatically identifies the structure of both .sm and .ssc files. It extracts #TITLE:, #BPMS:, #OFFSET:, and the #NOTES: array. It ignores other metadata lines gracefully.
+    In-place Rendering: Uses double-buffering logic in a string array and uses the ANSI \033[H command to move the cursor home and overwrite the UI each frame, preventing screen flickering.
+    Raw Input: Uses POSIX termios to disable canonical mode and echo, allowing instant keystroke registration for d f j k.
+    Timing & Windows: Features standard rhythm game windows (Perfect: ±40ms, Great: ±80ms, Good: ±120ms, Bad: ±180ms). Misses are calculated dynamically if you fail to hit a note in time.
+    Aesthetic UI: Implements bold ANSI colors for the 4 tracks (Red, Blue, Yellow, Green). Receptors blink [@] when successfully hit, and arrows move smoothly up the terminal on a fixed 100FPS loop using usleep.
+
+#Issues I found: the green arrow is always full. Tested using Max300.sm from https://zenius-i-vanisher.com/v5.2/viewsimfile.php?simfileid=785
+
+*/
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
