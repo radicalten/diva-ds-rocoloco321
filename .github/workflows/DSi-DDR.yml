@@ -12,8 +12,7 @@ jobs:
       uses: actions/checkout@v6
     - name: Install BlockDS
       run: |
-        dkp-pacman -Sy blocksds-default
-        echo "BLOCKSDS=${DEVKITPRO}/blocksds" >> $GITHUB_ENV
+        docker image pull skylyrac/blocksds:slim-latest
     - name: Compile
       run: |
         make -f Makefile
