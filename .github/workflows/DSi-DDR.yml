@@ -6,7 +6,7 @@ on:
 jobs:
   build-nds:
     runs-on: ubuntu-latest
-    container: skylyrac/blocksds:slim-latest
+    container: skylyrac/blocksds:dev-latest
     steps:
     - name: Checkout
       uses: actions/checkout@v6
