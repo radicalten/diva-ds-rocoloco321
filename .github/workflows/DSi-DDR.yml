@@ -2,7 +2,7 @@ name: DSi-DDR
 on:
   push:
     branches:
-    - main
+    - master
 jobs:
   build-nds:
     runs-on: ubuntu-latest
