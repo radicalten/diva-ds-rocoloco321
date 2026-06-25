@@ -1,0 +1,18 @@
+CC		:= cc
+CFLAGS 	:= -O3 -flto \
+-DUSE_EMBEDDED_BOOK -DNO_NNUE -D__APPLE__ -march=native -DUSE_PREFETCH -DUSE_POPCNT -DUSE_NEON
+LDFLAGS := $(CFLAGS) \
+-lcurl -lm
+TARGET  := myapp
+EXCLUDE := chess5/nnue.c chess5/numa.c
+SRCS    := $(filter-out $(EXCLUDE), $(wildcard chess5/*.c))
+#NNUE    := nn-62ef826d1a6d.nnue
+OBJS    := $(patsubst %.c,%.o,$(SRCS)) #network.o
+all: $(OBJS)
+	$(CC) $(OBJS) $(CFLAGS) $(LDFLAGS) -o $(TARGET) 
+%.o: %.c
+	$(CC) $(CFLAGS) -c $< -o $@
+#network.o: $(NNUE)
+#	$(CC) -x c -c /dev/null -o dummy.o
+#	ld -r -arch arm64 -o network.o dummy.o -sectcreate binary network_nnue $<
+#	rm dummy.o
