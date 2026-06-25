@@ -1,4 +1,6 @@
-/*
+/* Stepmania c prompt v1 6-24-26
+Create a single file stepmania program in C without external dependencies that updates all its graphics in place. It should accept both .sm and .ssc files and work in the Mac Terminal. The UI should be elegant. 
+Model: Grok 4.3
 
 Not salvagable. arrows scroll the wrong way, points and combo are not properly tracked, just pressing the button gives you points infinitely
 ui is no so good. 
