@@ -3,7 +3,7 @@ CFLAGS 	:= -O3 -flto \
 -DUSE_EMBEDDED_BOOK -DNO_NNUE -D__APPLE__ -march=native -DUSE_PREFETCH -DUSE_POPCNT -DUSE_NEON
 LDFLAGS := $(CFLAGS) \
 -lcurl -lm
-TARGET  := myapp
+TARGET  := ddr
 EXCLUDE := # chess5/nnue.c chess5/numa.c
 SRCS    := $(filter-out $(EXCLUDE), $(wildcard diva-mac/*.c))
 #NNUE    := nn-62ef826d1a6d.nnue
