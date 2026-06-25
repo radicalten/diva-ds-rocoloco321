@@ -1,3 +1,169 @@
+/* Stepmania c prompt v1 6-24-26
+Create a single file stepmania program in C without external dependencies that updates all its graphics in place. It should accept both .sm and .ssc files and work in the Mac Terminal. The UI should be elegant. 
+Model: Claude 4.6 Sonnet; initial release 2-17-26
+
+StepMania Terminal Player
+# Compile
+cc -O2 -o stepmania stepmania.c -lm
+
+# Run with a specific .sm or .ssc file
+./stepmania path/to/song.sm
+
+# Run with a folder of songs
+./stepmania path/to/Songs/
+
+# Scan current directory
+./stepmania
+
+
+How It Works
+Architecture
+Component	Description
+Parser	Full .sm and .ssc support — BPM segments, stops, offset, all note types
+Timing engine	Beat↔seconds conversion with BPM changes and stops
+Renderer	Redraws in-place using ANSI escape codes, no clear flicker
+Input	Raw terminal mode, multi-key detection
+Controls During Play
+Key	Action
+D F J K	4-panel lanes (←↓↑→)
+S D F J K L	6-panel lanes
+A S D F J K L ;	8-panel (double)
+Space	Pause / Resume
++ / -	Scroll speed
+Q	Quit to results
+Visual Features
+
+    Color-coded notes by beat subdivision (4th = white, 8th = yellow, 16th = green, etc.)
+    Hit flash on receptors with judgement color
+    Hold bodies rendered as continuous bars
+    Live score, combo, BPM display
+    Progress bar at bottom
+    Results screen with letter grade (SSS → E)
+    Elegant borders using box-drawing characters
+
+
+#Notes: fails when starting up:
+dyld[88886]: dyld cache '(null)' not loaded: syscall to map cache into shared region failed
+dyld[88886]: Library not loaded: /usr/lib/libSystem.B.dylib
+  Referenced from: <77060B7E-A238-3B63-8546-BA9E76EF9124> /Users/me/Documents/DDR-Stepmania/ddr
+  Reason: tried: '/usr/lib/libSystem.B.dylib' (no such file), '/System/Volumes/Preboot/Cryptexes/OS/usr/lib/libSystem.B.dylib' (no such file), '/usr/lib/libSystem.B.dylib' (no such file, no dyld cache)
+zsh: abort      /Users/me/Documents/DDR-Stepmania/ddr
+
+
+claude 4.6 sonnet says:
+This error means your Mac can't find the system libraries — it's almost always caused by missing or incomplete Xcode Command Line Tools. Let's fix it step by step.
+
+Step 1 — Install / Reinstall Command Line Tools
+# Remove the existing (broken) install
+sudo rm -rf /Library/Developer/CommandLineTools
+
+# Reinstall
+xcode-select --install
+
+A dialog will pop up — click Install and wait (~5 minutes).
+
+Step 2 — Verify the install worked
+xcode-select -p
+# Should print: /Library/Developer/CommandLineTools
+
+ls /usr/lib/libSystem.B.dylib
+# Should list the file without error
+
+Step 3 — Recompile cleanly
+
+cd /Users/me/Documents/DDR-Stepmania
+
+# Remove the old broken binary
+rm -f ddr stepmania
+
+# Recompile, explicitly pointing to the SDK
+cc -O2 -o ddr stepmania.c -lm
+
+If Step 2 fails (libSystem still missing)
+This happens on some macOS versions where the lib lives only in the SDK, not /usr/lib directly. Try:
+
+# Find where it actually is
+find /Library/Developer/CommandLineTools -name "libSystem.B.dylib" 2>/dev/null
+find /Applications/Xcode.app -name "libSystem.B.dylib" 2>/dev/null
+
+# Compile with explicit sysroot
+SDK=$(xcrun --show-sdk-path)
+cc -O2 -isysroot "$SDK" -o ddr stepmania.c -lm
+
+If you have Xcode (not just CLT)
+
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+cc -O2 -o ddr stepmania.c -lm
+
+Quick Diagnosis — run this and share the output if still stuck
+
+echo "=== macOS version ===" && sw_vers
+echo "=== xcode-select ===" && xcode-select -p
+echo "=== SDK path ===" && xcrun --show-sdk-path 2>&1
+echo "=== cc location ===" && which cc && cc --version
+echo "=== libSystem ===" && ls /usr/lib/libSystem* 2>&1
+
+The most common cause on recent Macs (Ventura/Sonoma) is that the Command Line Tools package got corrupted after an OS update — the reinstall in Step 1 fixes it in nearly every case.
+
+=== macOS version ===
+ProductName:		macOS
+ProductVersion:		14.6.1
+BuildVersion:		23G93
+=== xcode-select ===
+/Library/Developer/CommandLineTools
+=== SDK path ===
+/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+=== cc location ===
+/usr/bin/cc
+Apple clang version 12.0.5 (clang-1205.0.22.11)
+Target: arm64-apple-darwin23.6.0
+Thread model: posix
+InstalledDir: /Library/Developer/CommandLineTools/usr/bin
+=== libSystem ===
+zsh: no matches found: /usr/lib/libSystem*
+
+The problem is clear: Clang 12 on Sonoma 14.6.1 — your Command Line Tools are very outdated (CLT 12 is from 2021) but macOS Sonoma moved libSystem out of /usr/lib into the dyld shared cache, so old toolchains can't find it.
+Fix — Update Command Line Tools
+
+# Remove the stale install
+sudo rm -rf /Library/Developer/CommandLineTools
+
+# Reinstall (this will pull the current version for Sonoma)
+xcode-select --install
+
+Wait for the GUI installer to finish, then verify:
+
+cc --version
+# Should say clang-1600.x.x or similar (NOT 1205)
+
+If the GUI installer says "already installed" or errors out
+
+Use Software Update instead:
+
+softwareupdate --list
+# Look for "Command Line Tools for Xcode"
+
+softwareupdate --install "Command Line Tools for Xcode-16.2"
+# Use whatever version name appeared in --list
+
+Or download directly from Apple:
+
+    Go to https://developer.apple.com/download/all/
+    Sign in with a free Apple ID
+    Search "Command Line Tools"
+    Download the latest version for macOS 14 (.pkg file)
+    Double-click to install
+
+After updating, recompile
+
+cd /Users/me/Documents/DDR-Stepmania
+rm -f ddr
+cc -O2 -o ddr stepmania.c -lm
+./ddr
+
+
+*/
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
