@@ -14,10 +14,10 @@ jobs:
         make -f Makefile-Diva-Mac
     - name: Create tarball
       run: |
-        tar -cvf myapp.tgz myapp
+        tar -cvf ddr.tgz ddr
     - name: Upload
       uses: actions/upload-artifact@v6
       with:
         name: Artifact
         path: |
-          ./myapp
+          ./ddr
