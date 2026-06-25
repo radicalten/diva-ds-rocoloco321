@@ -4,309 +4,906 @@
 #include <unistd.h>
 #include <termios.h>
 #include <sys/time.h>
-#include <signal.h>
-#include <ctype.h>
+#include <sys/ioctl.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 #include <math.h>
+#include <signal.h>
 
-#define MAX_NOTES 20000
-#define RECEPTOR_ROW 4
-#define SPAWN_ROW 24
-#define FIELD_HEIGHT 20
+#define MAX_TAGS 4096
+#define MAX_CHARTS 64
+#define MAX_NOTES 100000
+#define MAX_BPM_CHANGES 1024
+#define BUF_WIDTH 512
+#define BUF_HEIGHT 128
+
+#define KEY_UP 1001
+#define KEY_DOWN 1002
+#define KEY_LEFT 1003
+#define KEY_RIGHT 1004
 
 typedef struct {
-    double time;
-    int col;
-    int hit;
-    int active;
+    char key[128];
+    char *val;
+} SMTag;
+
+typedef struct {
+    char type[64];
+    char description[128];
+    char difficulty[64];
+    int meter;
+    char *note_data_ptr;
+} SMChart;
+
+typedef struct {
+    double beat;
+    char type[4]; // Left, Down, Up, Right characters ('0','1','2','3','M')
+    int hit;      // 0 = unhit, 1 = hit, 2 = missed
 } Note;
 
 typedef struct {
-    char title[256];
+    double beat;
     double bpm;
-    double offset;
-    Note notes[MAX_NOTES];
-    int note_count;
-} Song;
+    double time; // Time in seconds when this segment starts
+} BPMChange;
 
-// Global for terminal restoration
+// Global State
+SMTag tags[MAX_TAGS];
+int tag_count = 0;
+SMChart charts[MAX_CHARTS];
+int chart_count = 0;
+Note notes[MAX_NOTES];
+int note_count = 0;
+BPMChange bpm_changes[MAX_BPM_CHANGES];
+int bpm_change_count = 0;
+
+char title[256] = "Unknown Title";
+char artist[256] = "Unknown Artist";
+char music_file[256] = "";
+double music_offset = 0.0;
+double song_duration = 0.0;
+
+// Terminal and Rendering Buffer
 struct termios orig_termios;
+int term_width = 80;
+int term_height = 24;
+char screen_buf[BUF_HEIGHT][BUF_WIDTH];
+char color_buf[BUF_HEIGHT][BUF_WIDTH][32];
 
-void cleanup_terminal() {
-    tcsetattr(0, TCSANOW, &orig_termios);
-    printf("\033[?25h\n"); // Show cursor
-    printf("\033[0m\n");   // Reset colors
+// Game State
+pid_t audio_pid = -1;
+int score = 0;
+int combo = 0;
+int max_combo = 0;
+int autoplay = 1; // Default to Autoplay for elegant visualization demonstration
+char active_judgement[32] = "";
+char judgement_color[32] = "";
+double judgement_time = 0.0;
+int key_pressed[4] = {0};
+double key_press_time[4] = {0.0};
+
+// Helper prototypes
+void disable_raw_mode();
+void stop_audio();
+
+void trim(char *s) {
+    char *p = s;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (p != s) {
+        memmove(s, p, strlen(p) + 1);
+    }
+    int len = strlen(s);
+    while (len > 0 && (s[len-1] == ' ' || s[len-1] == '\t' || s[len-1] == '\r' || s[len-1] == '\n')) {
+        s[len-1] = '\0';
+        len--;
+    }
+}
+
+double get_time_seconds() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+// Signal and exit cleanups
+void cleanup() {
+    stop_audio();
+    disable_raw_mode();
+    printf("\x1b[?25h\x1b[0m"); // Restore cursor and reset colors
+    fflush(stdout);
 }
 
 void handle_sigint(int sig) {
-    (void)sig;
-    exit(1);
+    exit(0);
 }
 
-void setup_terminal() {
-    tcgetattr(0, &orig_termios);
+// Terminal I/O Controls
+void disable_raw_mode() {
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+}
+
+void enable_raw_mode() {
+    tcgetattr(STDIN_FILENO, &orig_termios);
     struct termios raw = orig_termios;
-    raw.c_lflag &= ~(ECHO | ICANON);
+    raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+    raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    raw.c_cflag |= (CS8);
     raw.c_cc[VMIN] = 0;
-    raw.c_cc[VTIME] = 0;
-    tcsetattr(0, TCSANOW, &raw);
-    printf("\033[?25l"); // Hide cursor
-    printf("\033[2J");   // Clear screen
-    atexit(cleanup_terminal);
-    signal(SIGINT, handle_sigint);
+    raw.c_cc[VTIME] = 0; // Non-blocking
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
 }
 
-double get_time() {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return tv.tv_sec + tv.tv_usec / 1000000.0;
-}
-
-void parse_sm(const char* filename, Song* song) {
-    FILE* f = fopen(filename, "r");
-    if (!f) {
-        printf("Failed to open file: %s\n", filename);
-        exit(1);
-    }
-
-    song->note_count = 0;
-    song->bpm = 0;
-    song->offset = 0;
-    strcpy(song->title, "Unknown");
-
-    char line[1024];
-    int in_notes = 0;
-    int measure_num = 0;
-    int lines_in_measure = 0;
-    char measure_rows[256][16];
-
-    while (fgets(line, sizeof(line), f)) {
-        char* p = line;
-        while (isspace(*p)) p++;
-
-        // Strip comments
-        char* comment = strstr(p, "//");
-        if (comment) *comment = '\0';
-
-        if (!in_notes) {
-            if (strncmp(p, "#TITLE:", 7) == 0) {
-                sscanf(p, "#TITLE:%[^;];", song->title);
-            } else if (strncmp(p, "#BPMS:", 6) == 0) {
-                char* eq = strchr(p, '=');
-                if (eq) song->bpm = atof(eq + 1);
-            } else if (strncmp(p, "#OFFSET:", 8) == 0) {
-                char* val = strchr(p, ':');
-                if (val) song->offset = atof(val + 1);
-            } else if (strncmp(p, "#NOTES:", 7) == 0 || strncmp(p, "#NOTEDATA:", 10) == 0) {
-                in_notes = 1;
-                measure_num = 0;
-                lines_in_measure = 0;
+int read_key() {
+    char c;
+    int n = read(STDIN_FILENO, &c, 1);
+    if (n <= 0) return 0;
+    
+    if (c == '\x1b') {
+        char seq[3];
+        if (read(STDIN_FILENO, &seq[0], 1) <= 0) return '\x1b';
+        if (read(STDIN_FILENO, &seq[1], 1) <= 0) return '\x1b';
+        if (seq[0] == '[') {
+            switch (seq[1]) {
+                case 'A': return KEY_UP;
+                case 'B': return KEY_DOWN;
+                case 'C': return KEY_RIGHT;
+                case 'D': return KEY_LEFT;
             }
-        } else {
-            if (strchr(p, ':')) continue; // Skip metadata lines inside NOTES
+        }
+        return '\x1b';
+    }
+    return c;
+}
 
-            char temp[64];
-            strcpy(temp, p);
-            char* comma = strchr(temp, ',');
-            if (comma) *comma = '\0';
-            char* semi = strchr(temp, ';');
-            if (semi) *semi = '\0';
+// File Comment Stripper
+void remove_comments(char *buf) {
+    int in_comment = 0;
+    for (int i = 0; buf[i]; i++) {
+        if (in_comment) {
+            if (buf[i] == '\n') {
+                in_comment = 0;
+            } else {
+                buf[i] = ' ';
+            }
+        } else if (buf[i] == '/' && buf[i+1] == '/') {
+            in_comment = 1;
+            buf[i] = ' ';
+            buf[i+1] = ' ';
+            i++;
+        }
+    }
+}
+
+// StepMania Tag Parser
+void parse_tags(char *buf) {
+    char *ptr = buf;
+    while (*ptr) {
+        if (*ptr == '#') {
+            ptr++;
+            char *key_start = ptr;
+            while (*ptr && *ptr != ':' && *ptr != ';') {
+                ptr++;
+            }
+            if (!*ptr) break;
             
-            char* end = temp + strlen(temp) - 1;
-            while(end > temp && isspace(*end)) end--;
-            *(end + 1) = '\0';
-
-            if (strlen(temp) >= 4 && (isdigit(temp[0]) || temp[0] == 'M')) {
-                if (lines_in_measure < 256) {
-                    strncpy(measure_rows[lines_in_measure], temp, 16);
-                    lines_in_measure++;
+            int key_len = ptr - key_start;
+            if (key_len >= 128) key_len = 127;
+            char key[128];
+            strncpy(key, key_start, key_len);
+            key[key_len] = '\0';
+            trim(key);
+            
+            if (*ptr == ':') {
+                ptr++;
+                char *val_start = ptr;
+                while (*ptr && *ptr != ';') {
+                    ptr++;
+                }
+                int val_len = ptr - val_start;
+                char *val = malloc(val_len + 1);
+                strncpy(val, val_start, val_len);
+                val[val_len] = '\0';
+                
+                if (tag_count < MAX_TAGS) {
+                    strcpy(tags[tag_count].key, key);
+                    tags[tag_count].val = val;
+                    tag_count++;
+                } else {
+                    free(val);
+                }
+            } else if (*ptr == ';') {
+                if (tag_count < MAX_TAGS) {
+                    strcpy(tags[tag_count].key, key);
+                    tags[tag_count].val = strdup("");
+                    tag_count++;
                 }
             }
+            if (*ptr == ';') ptr++;
+        } else {
+            ptr++;
+        }
+    }
+}
 
-            if (strchr(p, ',') || strchr(p, ';')) {
-                double beat_offset = measure_num * 4.0;
-                for (int i = 0; i < lines_in_measure; i++) {
-                    double beat = beat_offset + (4.0 * i / lines_in_measure);
-                    double time = song->offset + beat * (60.0 / song->bpm);
+void parse_note_tag_sm(char *val, SMChart *chart) {
+    char *p = val;
+    char *fields[6] = {NULL};
+    int f = 0;
+    fields[f++] = p;
+    while (*p) {
+        if (*p == ':') {
+            *p = '\0';
+            if (f < 6) fields[f++] = p + 1;
+        }
+        p++;
+    }
+    if (f >= 6) {
+        strncpy(chart->type, fields[0], sizeof(chart->type)-1); trim(chart->type);
+        strncpy(chart->description, fields[1], sizeof(chart->description)-1); trim(chart->description);
+        strncpy(chart->difficulty, fields[2], sizeof(chart->difficulty)-1); trim(chart->difficulty);
+        chart->meter = atoi(fields[3]);
+        chart->note_data_ptr = fields[5];
+    } else {
+        chart->note_data_ptr = val;
+    }
+}
+
+void build_charts_list(char *file_buf) {
+    int is_ssc = (strstr(file_buf, "#NOTEDATA") != NULL);
+    if (is_ssc) {
+        SMChart *cur = NULL;
+        for (int i = 0; i < tag_count; i++) {
+            if (strcmp(tags[i].key, "NOTEDATA") == 0) {
+                if (chart_count < MAX_CHARTS) {
+                    cur = &charts[chart_count++];
+                    memset(cur, 0, sizeof(SMChart));
+                }
+            }
+            if (cur) {
+                if (strcmp(tags[i].key, "STEPSTYPE") == 0) {
+                    strncpy(cur->type, tags[i].val, sizeof(cur->type)-1); trim(cur->type);
+                } else if (strcmp(tags[i].key, "DIFFICULTY") == 0) {
+                    strncpy(cur->difficulty, tags[i].val, sizeof(cur->difficulty)-1); trim(cur->difficulty);
+                } else if (strcmp(tags[i].key, "METER") == 0) {
+                    cur->meter = atoi(tags[i].val);
+                } else if (strcmp(tags[i].key, "NOTES") == 0) {
+                    cur->note_data_ptr = tags[i].val;
+                }
+            }
+        }
+    } else {
+        for (int i = 0; i < tag_count; i++) {
+            if (strcmp(tags[i].key, "NOTES") == 0) {
+                if (chart_count < MAX_CHARTS) {
+                    SMChart *cur = &charts[chart_count++];
+                    memset(cur, 0, sizeof(SMChart));
+                    parse_note_tag_sm(tags[i].val, cur);
+                }
+            }
+        }
+    }
+}
+
+void parse_bpms(const char *val) {
+    bpm_change_count = 0;
+    char *copy = strdup(val);
+    trim(copy);
+    char *saveptr1 = NULL;
+    char *tok = strtok_r(copy, ",", &saveptr1);
+    while (tok) {
+        char *saveptr2 = NULL;
+        char *beat_str = strtok_r(tok, "=", &saveptr2);
+        char *bpm_str = strtok_r(NULL, "=", &saveptr2);
+        if (beat_str && bpm_str) {
+            double beat = atof(beat_str);
+            double bpm = atof(bpm_str);
+            if (bpm_change_count < MAX_BPM_CHANGES) {
+                bpm_changes[bpm_change_count].beat = beat;
+                bpm_changes[bpm_change_count].bpm = bpm;
+                bpm_change_count++;
+            }
+        }
+        tok = strtok_r(NULL, ",", &saveptr1);
+    }
+    free(copy);
+    
+    if (bpm_change_count > 0) {
+        bpm_changes[0].time = 0.0;
+        for (int i = 1; i < bpm_change_count; i++) {
+            double delta_beat = bpm_changes[i].beat - bpm_changes[i-1].beat;
+            double duration = delta_beat * (60.0 / bpm_changes[i-1].bpm);
+            bpm_changes[i].time = bpm_changes[i-1].time + duration;
+        }
+    }
+}
+
+double beat_to_seconds(double beat) {
+    if (bpm_change_count == 0) return 0.0;
+    int seg = 0;
+    for (int i = 1; i < bpm_change_count; i++) {
+        if (beat >= bpm_changes[i].beat) {
+            seg = i;
+        } else {
+            break;
+        }
+    }
+    double db = beat - bpm_changes[seg].beat;
+    return bpm_changes[seg].time + db * (60.0 / bpm_changes[seg].bpm);
+}
+
+double seconds_to_beat(double sec) {
+    if (bpm_change_count == 0) return 0.0;
+    int seg = 0;
+    for (int i = 1; i < bpm_change_count; i++) {
+        if (sec >= bpm_changes[i].time) {
+            seg = i;
+        } else {
+            break;
+        }
+    }
+    double dt = sec - bpm_changes[seg].time;
+    return bpm_changes[seg].beat + dt * (bpm_changes[seg].bpm / 60.0);
+}
+
+double get_current_bpm(double beat) {
+    if (bpm_change_count == 0) return 120.0;
+    int seg = 0;
+    for (int i = 1; i < bpm_change_count; i++) {
+        if (beat >= bpm_changes[i].beat) {
+            seg = i;
+        } else {
+            break;
+        }
+    }
+    return bpm_changes[seg].bpm;
+}
+
+void parse_notes(const char *data) {
+    note_count = 0;
+    char *data_copy = strdup(data);
+    char *measure_save = NULL;
+    char *measure_str = strtok_r(data_copy, ",", &measure_save);
+    int measure_index = 0;
+    
+    while (measure_str) {
+        char *row_ptrs[4096];
+        int row_count = 0;
+        char *line_save = NULL;
+        char *line = strtok_r(measure_str, "\n\r", &line_save);
+        
+        while (line) {
+            char clean_line[64] = "";
+            int idx = 0;
+            for (int i = 0; line[i]; i++) {
+                if (line[i] != ' ' && line[i] != '\t' && line[i] != '\r' && line[i] != '\n') {
+                    if (idx < 63) clean_line[idx++] = line[i];
+                }
+            }
+            clean_line[idx] = '\0';
+            if (strlen(clean_line) == 4) {
+                row_ptrs[row_count++] = strdup(clean_line);
+            }
+            line = strtok_r(NULL, "\n\r", &line_save);
+        }
+        
+        for (int r = 0; r < row_count; r++) {
+            double beat = (double)measure_index * 4.0 + ((double)r / (double)row_count) * 4.0;
+            int has_note = 0;
+            for (int c = 0; c < 4; c++) {
+                if (row_ptrs[r][c] != '0') has_note = 1;
+            }
+            if (has_note && note_count < MAX_NOTES) {
+                notes[note_count].beat = beat;
+                memcpy(notes[note_count].type, row_ptrs[r], 4);
+                notes[note_count].hit = 0;
+                note_count++;
+            }
+            free(row_ptrs[r]);
+        }
+        measure_str = strtok_r(NULL, ",", &measure_save);
+        measure_index++;
+    }
+    free(data_copy);
+    if (note_count > 0) {
+        song_duration = beat_to_seconds(notes[note_count - 1].beat);
+    }
+}
+
+// Audio System Wrapper (macOS Native Subprocess)
+void start_audio(const char *chart_path, const char *music_filename) {
+    char path[1024] = "";
+    const char *last_slash = strrchr(chart_path, '/');
+    if (last_slash) {
+        int dir_len = last_slash - chart_path + 1;
+        strncpy(path, chart_path, dir_len);
+        path[dir_len] = '\0';
+        strcat(path, music_filename);
+    } else {
+        strcpy(path, music_filename);
+    }
+    
+    if (access(path, F_OK) == -1) {
+        return; // Visual mode fallback if audio not found
+    }
+    
+    audio_pid = fork();
+    if (audio_pid == 0) {
+        int devnull = open("/dev/null", O_WRONLY);
+        dup2(devnull, STDOUT_FILENO);
+        dup2(devnull, STDERR_FILENO);
+        close(devnull);
+        execlp("afplay", "afplay", path, NULL);
+        exit(1);
+    }
+}
+
+void stop_audio() {
+    if (audio_pid > 0) {
+        kill(audio_pid, SIGKILL);
+        int s;
+        waitpid(audio_pid, &s, 0);
+        audio_pid = -1;
+    }
+}
+
+// Interactive Terminal UI Menu
+int select_chart_menu(SMChart *charts, int count) {
+    int selected = 0;
+    enable_raw_mode();
+    printf("\x1b[?25l"); // Hide cursor
+    while (1) {
+        printf("\x1b[2J\x1b[H");
+        printf("\x1b[1;36m┌──────────────────────────────────────────────┐\x1b[0m\n");
+        printf("\x1b[1;36m│          TERMINAL rhythm engine              │\x1b[0m\n");
+        printf("\x1b[1;36m└──────────────────────────────────────────────┘\x1b[0m\n\n");
+        printf("Song: \x1b[1;97m%s\x1b[0m by \x1b[1;32m%s\x1b[0m\n\n", title, artist);
+        printf("Select active chart difficulty:\n\n");
+        
+        for (int i = 0; i < count; i++) {
+            if (i == selected) {
+                printf("  \x1b[1;93m▶ \x1b[1;97m[\x1b[1;31m%-11s\x1b[1;97m] Meter: \x1b[1;92m%-2d\x1b[1;97m  Type: %s\x1b[0m\n", 
+                       charts[i].difficulty, charts[i].meter, charts[i].type);
+            } else {
+                printf("    [\x1b[1;30m%-11s\x1b[0m] Meter: %-2d  Type: \x1b[2m%s\x1b[0m\n", 
+                       charts[i].difficulty, charts[i].meter, charts[i].type);
+            }
+        }
+        
+        printf("\n\x1b[3mUse ↑/↓ Arrows (or J/K) to select, [ENTER] to Play.\x1b[0m\n");
+        printf("\x1b[2mPress [Q] or [ESC] to exit.\x1b[0m\n");
+        fflush(stdout);
+        
+        int key = read_key();
+        if (key == KEY_UP || key == 'j' || key == 'J') {
+            selected = (selected - 1 + count) % count;
+        } else if (key == KEY_DOWN || key == 'k' || key == 'K') {
+            selected = (selected + 1) % count;
+        } else if (key == '\n' || key == '\r') {
+            break;
+        } else if (key == 'q' || key == 'Q' || key == '\x1b') {
+            disable_raw_mode();
+            exit(0);
+        }
+        usleep(15000);
+    }
+    disable_raw_mode();
+    return selected;
+}
+
+// Double-Buffered Visual Renderer
+void clear_screen_buf() {
+    for (int y = 0; y < term_height; y++) {
+        for (int x = 0; x < term_width; x++) {
+            screen_buf[y][x] = ' ';
+            color_buf[y][x][0] = '\0';
+        }
+    }
+}
+
+void draw_str(int x, int y, const char *str, const char *color) {
+    if (y < 0 || y >= term_height) return;
+    int len = strlen(str);
+    for (int i = 0; i < len; i++) {
+        int cx = x + i;
+        if (cx < 0 || cx >= term_width) continue;
+        screen_buf[y][cx] = str[i];
+        if (color) {
+            strncpy(color_buf[y][cx], color, sizeof(color_buf[y][cx])-1);
+        } else {
+            color_buf[y][cx][0] = '\0';
+        }
+    }
+}
+
+void render_to_terminal() {
+    printf("\x1b[H"); // Cursor home position (prevents flicker)
+    char last_color[32] = "";
+    for (int y = 0; y < term_height; y++) {
+        for (int x = 0; x < term_width; x++) {
+            char *color = color_buf[y][x];
+            if (strcmp(color, last_color) != 0) {
+                if (color[0] != '\0') {
+                    printf("%s", color);
+                } else {
+                    printf("\x1b[0m");
+                }
+                strcpy(last_color, color);
+            }
+            putchar(screen_buf[y][x]);
+        }
+        if (y < term_height - 1) {
+            putchar('\n');
+        }
+    }
+    printf("\x1b[0m");
+    fflush(stdout);
+}
+
+void get_terminal_size() {
+    struct winsize w;
+    ioctl(STDOUT_FILENO, TIOCGWINSZ, &w);
+    term_width = w.ws_col;
+    term_height = w.ws_row;
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        fprintf(stderr, "\x1b[1;31mUsage:\x1b[0m %s <path_to_chart_file.sm/.ssc>\n", argv[0]);
+        return 1;
+    }
+    
+    char *filepath = argv[1];
+    FILE *file = fopen(filepath, "r");
+    if (!file) {
+        perror("Error opening file");
+        return 1;
+    }
+    
+    fseek(file, 0, SEEK_END);
+    long size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    char *buf = malloc(size + 1);
+    fread(buf, 1, size, file);
+    buf[size] = '\0';
+    fclose(file);
+    
+    remove_comments(buf);
+    parse_tags(buf);
+    
+    // Scan standard descriptors
+    for (int i = 0; i < tag_count; i++) {
+        if (strcmp(tags[i].key, "TITLE") == 0) {
+            strncpy(title, tags[i].val, sizeof(title)-1); trim(title);
+        } else if (strcmp(tags[i].key, "ARTIST") == 0) {
+            strncpy(artist, tags[i].val, sizeof(artist)-1); trim(artist);
+        } else if (strcmp(tags[i].key, "MUSIC") == 0) {
+            strncpy(music_file, tags[i].val, sizeof(music_file)-1); trim(music_file);
+        } else if (strcmp(tags[i].key, "OFFSET") == 0) {
+            music_offset = atof(tags[i].val);
+        } else if (strcmp(tags[i].key, "BPMS") == 0) {
+            parse_bpms(tags[i].val);
+        }
+    }
+    
+    build_charts_list(buf);
+    
+    if (chart_count == 0) {
+        fprintf(stderr, "No playfield charts found in file.\n");
+        free(buf);
+        return 1;
+    }
+    
+    int chosen_idx = select_chart_menu(charts, chart_count);
+    SMChart selected_chart = charts[chosen_idx];
+    parse_notes(selected_chart.note_data_ptr);
+    free(buf);
+    
+    // Register visual signal handlers
+    signal(SIGINT, handle_sigint);
+    signal(SIGTERM, handle_sigint);
+    atexit(cleanup);
+    
+    get_terminal_size();
+    enable_raw_mode();
+    
+    printf("\x1b[2J"); // Clear once completely
+    
+    start_audio(filepath, music_file);
+    double start_time = get_time_seconds();
+    
+    int frame_count = 0;
+    
+    // Main Game Loop
+    while (1) {
+        if (frame_count % 15 == 0) {
+            get_terminal_size();
+        }
+        frame_count++;
+        
+        double current_real_time = get_time_seconds() - start_time;
+        // StepMania sync uses: Beat_Time = Audio_Time - (Offset)
+        // Offset is negative if visual beat 0 is ahead of audio start
+        double current_game_time = current_real_time - music_offset;
+        double current_beat = seconds_to_beat(current_game_time);
+        
+        if (current_beat < 0.0) current_beat = 0.0;
+        
+        // Handle input events
+        int key = read_key();
+        while (key != 0) {
+            if (key == 'q' || key == 'Q' || key == '\x1b') {
+                exit(0);
+            }
+            if (key == 'a' || key == 'A') {
+                autoplay = !autoplay;
+                key = read_key();
+                continue;
+            }
+            
+            int col = -1;
+            if (key == 'd' || key == 'D' || key == KEY_LEFT) col = 0;
+            else if (key == 'f' || key == 'F' || key == KEY_DOWN) col = 1;
+            else if (key == 'j' || key == 'J' || key == KEY_UP) col = 2;
+            else if (key == 'k' || key == 'K' || key == KEY_RIGHT) col = 3;
+            
+            if (col != -1 && !autoplay) {
+                key_pressed[col] = 1;
+                key_press_time[col] = current_game_time;
+                
+                // Track hits
+                int best_idx = -1;
+                double best_diff = 999.0;
+                for (int i = 0; i < note_count; i++) {
+                    if (notes[i].type[col] != '0' && notes[i].type[col] != '3' && notes[i].hit == 0) {
+                        double note_time = beat_to_seconds(notes[i].beat);
+                        double diff = note_time - current_game_time;
+                        if (fabs(diff) < fabs(best_diff)) {
+                            best_diff = diff;
+                            best_idx = i;
+                        }
+                    }
+                }
+                
+                if (best_idx != -1 && fabs(best_diff) <= 0.180) {
+                    notes[best_idx].hit = 1;
+                    double abs_diff = fabs(best_diff);
+                    if (abs_diff <= 0.022) {
+                        strcpy(active_judgement, "MARVELOUS");
+                        strcpy(judgement_color, "\x1b[1;96m"); // Cyan
+                        score += 1000; combo++;
+                    } else if (abs_diff <= 0.045) {
+                        strcpy(active_judgement, "PERFECT");
+                        strcpy(judgement_color, "\x1b[1;93m"); // Yellow
+                        score += 900; combo++;
+                    } else if (abs_diff <= 0.090) {
+                        strcpy(active_judgement, "GREAT");
+                        strcpy(judgement_color, "\x1b[1;92m"); // Green
+                        score += 600; combo++;
+                    } else if (abs_diff <= 0.135) {
+                        strcpy(active_judgement, "GOOD");
+                        strcpy(judgement_color, "\x1b[1;94m"); // Blue
+                        score += 300; combo++;
+                    } else {
+                        strcpy(active_judgement, "MISS");
+                        strcpy(judgement_color, "\x1b[1;31m"); // Red
+                        combo = 0;
+                    }
+                    if (combo > max_combo) max_combo = combo;
+                    judgement_time = current_game_time;
+                }
+            }
+            key = read_key();
+        }
+        
+        // Autoplay logic
+        if (autoplay) {
+            for (int i = 0; i < note_count; i++) {
+                if (notes[i].hit == 0) {
+                    double note_time = beat_to_seconds(notes[i].beat);
+                    if (current_game_time >= note_time) {
+                        notes[i].hit = 1;
+                        for (int c = 0; c < 4; c++) {
+                            if (notes[i].type[c] != '0' && notes[i].type[c] != '3') {
+                                key_pressed[c] = 1;
+                                key_press_time[c] = current_game_time;
+                            }
+                        }
+                        strcpy(active_judgement, "MARVELOUS");
+                        strcpy(judgement_color, "\x1b[1;96m");
+                        score += 1000; combo++;
+                        if (combo > max_combo) max_combo = combo;
+                        judgement_time = current_game_time;
+                    }
+                }
+            }
+        } else {
+            // Miss handling for pass-by notes
+            for (int i = 0; i < note_count; i++) {
+                if (notes[i].hit == 0) {
+                    double note_time = beat_to_seconds(notes[i].beat);
+                    if (current_game_time > note_time + 0.180) {
+                        notes[i].hit = 2; // Miss
+                        strcpy(active_judgement, "MISS");
+                        strcpy(judgement_color, "\x1b[1;31m");
+                        combo = 0;
+                        judgement_time = current_game_time;
+                    }
+                }
+            }
+        }
+        
+        // Auto-release visual feedback receptors
+        for (int c = 0; c < 4; c++) {
+            if (current_game_time - key_press_time[c] > 0.10) {
+                key_pressed[c] = 0;
+            }
+        }
+        
+        clear_screen_buf();
+        
+        // Center the playfield visually
+        int playfield_w = 25;
+        int start_x = (term_width - playfield_w) / 2;
+        int RY = 4; // Receptor height line
+        int H = term_height - 7;
+        
+        // Render boundary walls
+        for (int y = 2; y < term_height - 2; y++) {
+            draw_str(start_x, y, "|", "\x1b[38;5;238m");
+            draw_str(start_x + 6, y, "|", "\x1b[38;5;238m");
+            draw_str(start_x + 12, y, "|", "\x1b[38;5;238m");
+            draw_str(start_x + 18, y, "|", "\x1b[38;5;238m");
+            draw_str(start_x + 24, y, "|", "\x1b[38;5;238m");
+        }
+        
+        // Render Receptors
+        const char *receptor_symbols[4] = { "[ < ]", "[ v ]", "[ ^ ]", "[ > ]" };
+        for (int c = 0; c < 4; c++) {
+            int cx = start_x + 1 + c * 6;
+            if (key_pressed[c]) {
+                draw_str(cx, RY, receptor_symbols[c], "\x1b[1;97m\x1b[48;5;241m");
+            } else {
+                draw_str(cx, RY, receptor_symbols[c], "\x1b[1;30m");
+            }
+        }
+        
+        // Render Moving Arrows
+        double scroll_beats = 3.0; // Visual range visible on screen at once
+        for (int i = 0; i < note_count; i++) {
+            if (notes[i].hit != 0) continue;
+            
+            double note_beat = notes[i].beat;
+            double beat_diff = note_beat - current_beat;
+            
+            if (beat_diff >= -0.5 && beat_diff <= scroll_beats) {
+                // Notes scroll upwards from bottom of playfield to RY
+                int y = RY + (int)((beat_diff / scroll_beats) * H);
+                if (y > RY && y < term_height - 2) {
                     for (int c = 0; c < 4; c++) {
-                        char nc = measure_rows[i][c];
-                        if (nc == '1' || nc == '2' || nc == '4') {
-                            if (song->note_count < MAX_NOTES) {
-                                Note n = {time, c, 0, 1};
-                                song->notes[song->note_count++] = n;
+                        char type = notes[i].type[c];
+                        if (type != '0' && type != '3') {
+                            int cx = start_x + 1 + c * 6;
+                            
+                            // DDR Color Coding by beat division
+                            const char *color = "\x1b[32m"; // Default green
+                            double f = fmod(note_beat, 1.0);
+                            if (f < 1e-4) {
+                                color = "\x1b[1;91m"; // 4th note: Red
+                            } else if (fmod(note_beat * 2.0, 1.0) < 1e-4) {
+                                color = "\x1b[1;94m"; // 8th note: Blue
+                            } else if (fmod(note_beat * 3.0, 1.0) < 1e-4) {
+                                color = "\x1b[1;95m"; // 12th note: Magenta
+                            } else if (fmod(note_beat * 4.0, 1.0) < 1e-4) {
+                                color = "\x1b[1;93m"; // 16th note: Yellow
+                            }
+                            
+                            if (type == 'M') {
+                                draw_str(cx, y, " *M* ", "\x1b[1;31m");
+                            } else {
+                                const char *arrow_visuals[4] = { "<<<<<", "vvvvv", "^^^^^", ">>>>>" };
+                                draw_str(cx, y, arrow_visuals[c], color);
                             }
                         }
                     }
                 }
-                measure_num++;
-                lines_in_measure = 0;
-                if (strchr(p, ';')) in_notes = 0;
             }
         }
-    }
-    fclose(f);
-}
-
-int main(int argc, char* argv[]) {
-    if (argc < 2) {
-        printf("Usage: %s <file.sm|file.ssc>\n", argv[0]);
-        return 1;
-    }
-
-    Song song;
-    parse_sm(argv[1], &song);
-
-    if (song.note_count == 0) {
-        printf("No notes found in file.\n");
-        return 1;
-    }
-
-    setup_terminal();
-
-    int score = 0;
-    int combo = 0;
-    int max_combo = 0;
-    char judgment[16] = "";
-    double judgment_timer = 0;
-    double receptor_flash[4] = {0, 0, 0, 0};
-
-    double start_time = get_time() + 3.0; // 3 second countdown
-
-    const char* colors[] = {"\033[1;31m", "\033[1;34m", "\033[1;33m", "\033[1;32m"};
-    const char* symbols[] = {"<", "v", "^", ">"};
-
-    while (1) {
-        double song_time = get_time() - start_time;
-        double now = get_time();
-
-        // Input Handling
-        char c;
-        while (read(0, &c, 1) > 0) {
-            if (c == 'q') {
-                exit(0);
-            }
-            int col = -1;
-            if (c == 'd') col = 0;
-            if (c == 'f') col = 1;
-            if (c == 'j') col = 2;
-            if (c == 'k') col = 3;
-
-            if (col != -1) {
-                receptor_flash[col] = now;
-                int best_note = -1;
-                double best_diff = 0.18; // Hit window
-
-                for (int i = 0; i < song.note_count; i++) {
-                    if (song.notes[i].col == col && song.notes[i].active && !song.notes[i].hit) {
-                        double diff = fabs(song.notes[i].time - song_time);
-                        if (diff < best_diff) {
-                            best_diff = diff;
-                            best_note = i;
-                        }
-                    }
-                }
-
-                if (best_note != -1) {
-                    song.notes[best_note].hit = 1;
-                    song.notes[best_note].active = 0;
-                    if (best_diff < 0.04) { score += 1000; combo++; strcpy(judgment, "PERFECT"); }
-                    else if (best_diff < 0.08) { score += 600; combo++; strcpy(judgment, "GREAT"); }
-                    else if (best_diff < 0.12) { score += 300; combo++; strcpy(judgment, "GOOD"); }
-                    else { combo = 0; strcpy(judgment, "BAD"); }
-                    judgment_timer = now;
-                    if (combo > max_combo) max_combo = combo;
-                }
-            }
+        
+        // Render Judgement Text Feedback
+        if (current_game_time - judgement_time < 0.45) {
+            int j_len = strlen(active_judgement);
+            int jx = start_x + 12 - (j_len / 2);
+            draw_str(jx, RY + 2, active_judgement, judgement_color);
         }
-
-        // Miss checking
-        for (int i = 0; i < song.note_count; i++) {
-            if (song.notes[i].active && !song.notes[i].hit) {
-                if (song.notes[i].time < song_time - 0.18) {
-                    song.notes[i].active = 0;
-                    combo = 0;
-                    strcpy(judgment, "MISS");
-                    judgment_timer = now;
-                }
-            }
+        
+        // Render Beautiful Info Side panel
+        int panel_x = start_x + 28;
+        draw_str(panel_x, 2, "┌──────────────────────────────────────────┐", "\x1b[1;34m");
+        char row_title[128], row_artist[128], row_bpm[128], row_diff[128];
+        sprintf(row_title,  "│  Song:   %-31.31s │", title);
+        sprintf(row_artist, "│  Artist: %-31.31s │", artist);
+        sprintf(row_bpm,    "│  BPM:    %-31.1f │", get_current_bpm(current_beat));
+        sprintf(row_diff,   "│  Diff:   %-15.15s Meter: %-7d │", selected_chart.difficulty, selected_chart.meter);
+        
+        draw_str(panel_x, 3, row_title, "\x1b[1;34m");
+        draw_str(panel_x + 11, 3, title, "\x1b[1;97m");
+        draw_str(panel_x, 4, row_artist, "\x1b[1;34m");
+        draw_str(panel_x + 11, 4, artist, "\x1b[1;97m");
+        draw_str(panel_x, 5, row_bpm, "\x1b[1;34m");
+        draw_str(panel_x, 6, row_diff, "\x1b[1;34m");
+        draw_str(panel_x, 7, "├──────────────────────────────────────────┤", "\x1b[1;34m");
+        
+        char row_score[128], row_combo[128];
+        sprintf(row_score,  "│  Score:  %-31d │", score);
+        sprintf(row_combo,  "│  Combo:  %-15d Max: %-9d │", combo, max_combo);
+        draw_str(panel_x, 8, row_score, "\x1b[1;34m");
+        draw_str(panel_x + 11, 8, row_score + 11, "\x1b[1;93m");
+        draw_str(panel_x, 9, row_combo, "\x1b[1;34m");
+        if (combo > 0) {
+            char val_combo[32]; sprintf(val_combo, "%d", combo);
+            draw_str(panel_x + 11, 9, val_combo, "\x1b[1;92m");
         }
-
-        // End condition
-        if (song_time > song.notes[song.note_count - 1].time + 3.0) {
+        draw_str(panel_x, 10, "├──────────────────────────────────────────┤", "\x1b[1;34m");
+        
+        // Real-time Song Progress Bar
+        double progress = (song_duration > 0.0) ? (current_game_time / song_duration) : 0.0;
+        if (progress > 1.0) progress = 1.0;
+        if (progress < 0.0) progress = 0.0;
+        
+        char progress_bar[64] = "│  Progress: [";
+        int bar_width = 16;
+        int filled = (int)(progress * bar_width);
+        for (int b = 0; b < bar_width; b++) {
+            if (b < filled) strcat(progress_bar, "■");
+            else strcat(progress_bar, ".");
+        }
+        char perc[32]; sprintf(perc, "] %-3d%%       │", (int)(progress * 100));
+        strcat(progress_bar, perc);
+        draw_str(panel_x, 11, progress_bar, "\x1b[1;34m");
+        draw_str(panel_x, 12, "├──────────────────────────────────────────┤", "\x1b[1;34m");
+        
+        // Mode HUD indicator
+        if (autoplay) {
+            draw_str(panel_x, 13, "│  Mode:     [AUTOPLAY DEMO ACTIVE]        │", "\x1b[1;34m");
+            draw_str(panel_x + 13, 13, "[AUTOPLAY DEMO ACTIVE]", "\x1b[1;5;96m"); // Flashing Cyan
+        } else {
+            draw_str(panel_x, 13, "│  Mode:     [INTERACTIVE PLAY]            │", "\x1b[1;34m");
+            draw_str(panel_x + 13, 13, "[INTERACTIVE PLAY]", "\x1b[1;92m"); // Green
+        }
+        draw_str(panel_x, 14, "└──────────────────────────────────────────┘", "\x1b[1;34m");
+        
+        // Instructions
+        draw_str(panel_x, 16, "Controls:", "\x1b[1;97m");
+        draw_str(panel_x, 17, "  - D F J K  or  ← ↓ ↑ → Arrows to Play", "\x1b[2m");
+        draw_str(panel_x, 18, "  - Press [A] to toggle Autoplay Engine", "\x1b[2m");
+        draw_str(panel_x, 19, "  - Press [Q] or [ESC] to Exit", "\x1b[2m");
+        
+        render_to_terminal();
+        
+        // End condition (3 seconds past the last note)
+        if (current_game_time > song_duration + 3.0) {
             break;
         }
-
-        // Rendering
-        char buf[8192];
-        int len = 0;
-        len += sprintf(buf + len, "\033[H"); // Move cursor to top left
-
-        // Header
-        len += sprintf(buf + len, "\033[1;1H\033[0m StepMania Terminal - %.40s", song.title);
-        len += sprintf(buf + len, "\033[2;1H\033[0m Score: %-8d  Combo: %-4d", score, combo);
         
-        // Clear Field
-        for (int y = 4; y <= 24; y++) {
-            len += sprintf(buf + len, "\033[%d;1H             ", y);
-        }
-
-        // Receptors
-        len += sprintf(buf + len, "\033[%d;1H", RECEPTOR_ROW);
-        for (int i = 0; i < 4; i++) {
-            if (now - receptor_flash[i] < 0.1) {
-                len += sprintf(buf + len, "%s[@]\033[0m ", colors[i]);
-            } else {
-                len += sprintf(buf + len, "%s[ ]\033[0m ", colors[i]);
-            }
-        }
-
-        // Arrows
-        for (int i = 0; i < song.note_count; i++) {
-            if (song.notes[i].active) {
-                double time_until_hit = song.notes[i].time - song_time;
-                if (time_until_hit > -0.2 && time_until_hit < 2.5) {
-                    double progress = (2.5 - time_until_hit) / 2.5;
-                    int y = (int)(SPAWN_ROW - progress * FIELD_HEIGHT);
-                    if (y >= RECEPTOR_ROW + 1 && y <= SPAWN_ROW) {
-                        int col = song.notes[i].col;
-                        int x = col * 4 + 1;
-                        len += sprintf(buf + len, "\033[%d;%dH%s %s\033[0m", y, x, colors[col], symbols[col]);
-                    }
-                }
-            }
-        }
-
-        // Judgment & Combo display
-        if (now - judgment_timer < 0.5) {
-            len += sprintf(buf + len, "\033[7;1H\033[1m   %s   \033[0m", judgment);
-            if (combo > 0) {
-                len += sprintf(buf + len, "\033[8;3H\033[1m%d Combo\033[0m", combo);
-            }
-        }
-
-        // Countdown
-        if (song_time < 0) {
-            len += sprintf(buf + len, "\033[15;1H\033[1m  Get Ready... %d\033[0m", (int)(-song_time) + 1);
-        }
-
-        // Controls
-        len += sprintf(buf + len, "\033[28;1H\033[0m[d] Left  [f] Down  [j] Up  [k] Right  [q] Quit");
-
-        write(1, buf, len);
-        usleep(10000); // 100 FPS cap to prevent CPU hogging
+        // FPS Cap Limit (~60 FPS)
+        usleep(16666);
     }
-
-    // Final Screen
-    printf("\033[2J\033[H");
-    printf("=== Song Complete ===\n");
-    printf("Title: %s\n", song.title);
-    printf("Final Score: %d\n", score);
-    printf("Max Combo: %d\n", max_combo);
-    printf("\nPress Enter to exit...\n");
     
-    // Restore terminal temporarily to wait for enter
-    tcsetattr(0, TCSANOW, &orig_termios);
-    printf("\033[?25h"); // Show cursor
+    // Result Visual display
+    disable_raw_mode();
+    printf("\x1b[2J\x1b[H");
+    printf("\x1b[1;32m┌──────────────────────────────────────────────┐\x1b[0m\n");
+    printf("\x1b[1;32m│                SONG COMPLETE!                │\x1b[0m\n");
+    printf("\x1b[1;32m└──────────────────────────────────────────────┘\x1b[0m\n\n");
+    printf("  Title:       \x1b[1;97m%s\x1b[0m\n", title);
+    printf("  Artist:      \x1b[1;97m%s\x1b[0m\n", artist);
+    printf("  Difficulty:  \x1b[1;35m%s (%d)\x1b[0m\n\n", selected_chart.difficulty, selected_chart.meter);
+    printf("  Final Score: \x1b[1;93m%d\x1b[0m\n", score);
+    printf("  Max Combo:   \x1b[1;92m%d\x1b[0m / %d total notes\n\n", max_combo, note_count);
+    printf("\x1b[1;32m────────────────────────────────────────────────\x1b[0m\n");
+    printf("Press \x1b[1;97m[ENTER]\x1b[0m to return to Terminal.\n");
     getchar();
-
+    
     return 0;
 }
