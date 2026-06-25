@@ -162,6 +162,14 @@ cc -O2 -o ddr stepmania.c -lm
 ./ddr
 
 
+#appledev forums where they posit the reason it fails is a huge static data structure
+#https://developer.apple.com/forums/thread/722360 2022 thread:
+# Your third-party tooling is generating a huge static data structure, something that’s not compatible with the Apple silicon runtime model [1]. You have three choices:
+    You can change your code to not use a huge static data structure. In a C-based language you’d do that by allocating the data structure with malloc. I can’t help you on the Fortran side of things.
+    You can move that data structure into a dynamically linked library. Again, I know how to do that with Apple tools but I can’t help you with third-party tools.
+    You can raise this issue with your tool’s vendor via their support channel.
+Honestly, I recommend the latter. As I said above, you can’t be the first of their customers to hit this.
+
 */
 
 #include <stdio.h>
