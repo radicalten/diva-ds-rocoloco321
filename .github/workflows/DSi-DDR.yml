@@ -1,0 +1,21 @@
+name: DSi-DDR
+on:
+  push:
+    branches:
+    - main
+jobs:
+  build-nds:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm:latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v6
+    - name: Compile
+      run: |
+        make -f Makefile
+    - name: Upload
+      uses: actions/upload-artifact@v6
+      with:
+        name: dsi-DDR
+        path: |
+          *.nds
