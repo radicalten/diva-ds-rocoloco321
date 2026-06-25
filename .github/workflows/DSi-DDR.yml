@@ -10,6 +10,10 @@ jobs:
     steps:
     - name: Checkout
       uses: actions/checkout@v6
+    - name: Install BlocksDS
+      run: |
+        dkp-pacman -Sy --noconfirm blocksds
+        echo "BLOCKSDS=${DEVKITPRO}/blocksds" >> $GITHUB_ENV  
     - name: Compile
       run: |
         make -f Makefile
