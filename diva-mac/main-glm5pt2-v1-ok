@@ -1,6 +1,6 @@
 /* Stepmania c prompt v1 6-24-26
 Create a single file stepmania program in C without external dependencies that updates all its graphics in place. It should accept both .sm and .ssc files and work in the Mac Terminal. The UI should be elegant. 
-Model: GLM 5.2 (max)
+Model: GLM 5.2 (max); Initial Release 6-16-26
 Here is a complete, single-file C program that implements a StepMania-style rhythm game in the macOS Terminal. It parses both .sm and .ssc file formats, renders the UI in place using ANSI escape codes, and handles raw terminal input for low-latency gameplay.
 Features
     Universal Parser: Automatically identifies the structure of both .sm and .ssc files. It extracts #TITLE:, #BPMS:, #OFFSET:, and the #NOTES: array. It ignores other metadata lines gracefully.
