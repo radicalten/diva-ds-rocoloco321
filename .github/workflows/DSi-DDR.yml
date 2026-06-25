@@ -12,13 +12,8 @@ jobs:
       uses: actions/checkout@v6
     - name: Install BlockDS
       run: |
-        # 1. Clone the BlockDS SDK and its submodules (libnds, libfat, maxmod, etc.)
-        git clone --recursive https://github.com/blocksds/sdk.git /opt/blocksds
-        # 2. Add devkitARM's compiler to the PATH so BlockDS can find it
-        export PATH=/opt/devkitpro/devkitARM/bin:$PATH
-        # 3. Compile the BlockDS libraries and host tools (grit, mmutil, etc.)
-        cd /opt/blocksds
-        make -j$(nproc)
+        wf-pacman -Sy library -Sy --noconfirm blocksds
+        echo "BLOCKSDS=${DEVKITPRO}/blocksds" >> $GITHUB_ENV
     - name: Compile
       run: |
         make -f Makefile
