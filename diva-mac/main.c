@@ -26,7 +26,7 @@
 #define MAX_TITLE        256
 #define MAX_ARTIST       256
 #define MAX_DIFF         32
-#define MAX_NOTES        65536
+#define MAX_NOTES        8192
 #define FRAME_US         33333   /* ~30 fps */
 #define SCROLL_SPEED     4.0     /* default note speed */
 
