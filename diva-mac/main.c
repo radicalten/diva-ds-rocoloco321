@@ -1,1614 +1,1180 @@
+// stepterm.c - single-file StepMania-like terminal player for .sm/.ssc (Mac Terminal)
+// Build: clang -O2 -std=c11 stepterm.c -o stepterm
+// Run:   ./stepterm /path/to/song.sm
+//
+// Notes / scope:
+// - Terminal-only renderer (ANSI escapes), updates in-place (no scrolling), no external deps.
+// - Parses .sm and .ssc, supports dance-single (4 columns) charts.
+// - No audio playback (terminal-only); timing is based on chart BPM/offset.
+// - Tap notes: '1','2','4' are treated as hittable heads; holds/roll tails are not drawn.
+// - Keys: D F J K (or arrow keys).  Q quits.  +/- adjusts scroll speed.
+
+#include <ctype.h>
+#include <errno.h>
+#include <math.h>
+#include <signal.h>
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
-#include <math.h>
-#include <time.h>
-#include <termios.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/time.h>
 #include <sys/ioctl.h>
-#include <signal.h>
-#include <dirent.h>
-#include <ctype.h>
+#include <sys/select.h>
+#include <termios.h>
+#include <time.h>
+#include <unistd.h>
 
-/* ─────────────────────────────────────────────
-   CONSTANTS & LIMITS
-───────────────────────────────────────────── */
-#define MAX_MEASURES     2048
-#define MAX_NOTES_BEAT   64
-#define MAX_CHARTS       32
-#define MAX_BPM_SEGS     256
-#define MAX_STOP_SEGS    256
-#define MAX_OFFSET_SEGS  256
-#define MAX_COLS         10
-#define MAX_TITLE        256
-#define MAX_ARTIST       256
-#define MAX_DIFF         32
-#define MAX_NOTES        4096
-#define FRAME_US         33333   /* ~30 fps */
-#define SCROLL_SPEED     4.0     /* default note speed */
+#define MAX(a,b) ((a)>(b)?(a):(b))
+#define MIN(a,b) ((a)<(b)?(a):(b))
 
-/* Colors */
-#define COL_RESET   "\033[0m"
-#define COL_BOLD    "\033[1m"
-#define COL_DIM     "\033[2m"
-#define COL_RED     "\033[31m"
-#define COL_GREEN   "\033[32m"
-#define COL_YELLOW  "\033[33m"
-#define COL_BLUE    "\033[34m"
-#define COL_MAGENTA "\033[35m"
-#define COL_CYAN    "\033[36m"
-#define COL_WHITE   "\033[37m"
-#define COL_BRED    "\033[91m"
-#define COL_BGREEN  "\033[92m"
-#define COL_BYELLOW "\033[93m"
-#define COL_BBLUE   "\033[94m"
-#define COL_BMAGENTA "\033[95m"
-#define COL_BCYAN   "\033[96m"
-#define COL_BWHITE  "\033[97m"
-#define BG_BLACK    "\033[40m"
-#define BG_DARK     "\033[48;5;234m"
-#define BG_PANEL    "\033[48;5;236m"
-
-/* Note types */
-#define NT_NONE     '0'
-#define NT_TAP      '1'
-#define NT_HOLD_S   '2'
-#define NT_HOLD_E   '3'
-#define NT_ROLL_S   '4'
-#define NT_MINE     'M'
-#define NT_LIFT     'L'
-#define NT_FAKE     'F'
-
-/* Judgement */
-#define JDG_NONE    0
-#define JDG_MARV    1
-#define JDG_PERF    2
-#define JDG_GREAT   3
-#define JDG_GOOD    4
-#define JDG_BAD     5
-#define JDG_MISS    6
-
-/* Game state */
-#define STATE_MENU   0
-#define STATE_SELECT 1
-#define STATE_PLAY   2
-#define STATE_RESULT 3
-
-/* ─────────────────────────────────────────────
-   DATA STRUCTURES
-───────────────────────────────────────────── */
 typedef struct {
-    double beat;
-    double bpm;
+  double beat;
+  double bpm;
+  double time; // seconds at 'beat' before applying OFFSET
 } BPMSeg;
 
 typedef struct {
-    double beat;
-    double duration;
-} StopSeg;
+  double beat;
+  double time;  // seconds when note should be hit, after applying OFFSET
+  int col;      // 0..3
+  int type;     // 1 tap-like head
+  int hit;      // 0 no, 1 yes, -1 miss
+} Note;
 
 typedef struct {
-    double beat;
-    char   note[MAX_COLS];   /* one char per column */
-} NoteRow;
+  char stepstype[64];
+  char difficulty[64];
+  int meter;
+  Note *notes;
+  int nnotes, capnotes;
 
-typedef struct {
-    char   stepstype[32];    /* dance-single, dance-double, etc. */
-    char   description[128];
-    char   difficulty[MAX_DIFF];
-    int    meter;
-    int    numcols;
-    NoteRow notes[MAX_NOTES];
-    int    note_count;
+  // per-column index lists (indices into notes[], sorted by time)
+  int *colIdx[4];
+  int nCol[4];
+  int ptrCol[4];
 } Chart;
 
 typedef struct {
-    char   filepath[512];
-    char   title[MAX_TITLE];
-    char   subtitle[MAX_TITLE];
-    char   artist[MAX_ARTIST];
-    double offset;           /* seconds */
-    BPMSeg bpms[MAX_BPM_SEGS];
-    int    bpm_count;
-    StopSeg stops[MAX_STOP_SEGS];
-    int    stop_count;
-    Chart  charts[MAX_CHARTS];
-    int    chart_count;
-} Song;
+  char title[256];
+  double offset; // seconds
+  BPMSeg *bpms;
+  int nbpms;
+
+  Chart *charts;
+  int ncharts, capcharts;
+} Simfile;
 
 typedef struct {
-    double  beat;
-    double  time;          /* seconds from song start */
-    int     col;
-    char    type;
-    int     judged;        /* 0 = pending, judgement code */
-    int     hold_active;   /* for holds */
-    double  hold_end_beat;
-} ActiveNote;
+  int w, h;
+  char *ch;            // w*h chars
+  unsigned char *col;  // w*h color ids
+} Screen;
 
-typedef struct {
-    int     marv, perf, great, good, bad, miss;
-    int     combo, max_combo;
-    double  score;
-    double  accuracy;
-    int     total_taps;
-} ScoreData;
+enum {
+  C_DEFAULT = 0,
+  C_BORDER  = 6,   // cyan
+  C_TEXT    = 7,   // white
+  C_DIM     = 8,   // bright black-ish via 90
+  C_RED     = 1,
+  C_GREEN   = 2,
+  C_YELLOW  = 3,
+  C_BLUE    = 4,
+  C_MAG     = 5,
+  C_CYAN    = 6,
+  C_WHITE   = 7,
+  C_BRIGHT  = 8
+};
 
-/* ─────────────────────────────────────────────
-   GLOBALS
-───────────────────────────────────────────── */
-static struct termios orig_termios;
-static int g_running   = 1;
-static int g_state     = STATE_MENU;
-static int g_term_w    = 80;
-static int g_term_h    = 24;
-static double g_scroll = SCROLL_SPEED;
+static struct termios g_orig_termios;
+static volatile sig_atomic_t g_shouldQuit = 0;
 
-/* Song browser */
-static Song   g_songs[128];
-static int    g_song_count  = 0;
-static int    g_song_sel    = 0;
-static int    g_chart_sel   = 0;
-static int    g_scroll_off  = 0;
+static void die(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vfprintf(stderr, fmt, ap);
+  va_end(ap);
+  fputc('\n', stderr);
+  exit(1);
+}
 
-/* Playback */
-static Song   *g_song        = NULL;
-static Chart  *g_chart       = NULL;
-static ActiveNote g_anotes[MAX_NOTES];
-static int    g_anote_count  = 0;
-static double g_song_time    = -3.0;   /* seconds */
-static int    g_paused       = 0;
-static ScoreData g_score;
-static struct timeval g_last_frame;
-
-/* Column flash for hit feedback */
-static double g_col_flash[MAX_COLS];
-static int    g_col_flash_judge[MAX_COLS];
-static double g_judge_flash_time = 0.0;
-static int    g_last_judge       = JDG_NONE;
-
-/* Hold tracking */
-static int    g_hold_held[MAX_COLS]; /* is player holding col? */
-
-/* ─────────────────────────────────────────────
-   TERMINAL UTILITIES
-───────────────────────────────────────────── */
-static void term_raw(void) {
-    struct termios t;
-    tcgetattr(STDIN_FILENO, &orig_termios);
-    t = orig_termios;
-    t.c_lflag &= ~(ECHO | ICANON | ISIG);
-    t.c_iflag &= ~(IXON | ICRNL);
-    t.c_cc[VMIN]  = 0;
-    t.c_cc[VTIME] = 0;
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &t);
+static double now_sec(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+  }
+  // Fallback (should rarely hit on modern macOS)
+  return (double)time(NULL);
 }
 
 static void term_restore(void) {
-    tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_orig_termios);
+  // show cursor, reset attrs, leave alt buffer
+  write(STDOUT_FILENO, "\x1b[0m\x1b[?25h\x1b[?1049l", 18);
 }
 
-static void term_size(void) {
-    struct winsize ws;
-    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0) {
-        g_term_w = ws.ws_col;
-        g_term_h = ws.ws_row;
+static void on_signal(int sig) {
+  (void)sig;
+  g_shouldQuit = 1;
+}
+
+static void term_raw(void) {
+  if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO))
+    die("This program requires a TTY (run in Mac Terminal).");
+
+  if (tcgetattr(STDIN_FILENO, &g_orig_termios) != 0)
+    die("tcgetattr failed: %s", strerror(errno));
+
+  atexit(term_restore);
+  signal(SIGINT, on_signal);
+  signal(SIGTERM, on_signal);
+
+  struct termios raw = g_orig_termios;
+  raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+  raw.c_oflag &= ~(OPOST);
+  raw.c_cflag |= (CS8);
+  raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+  raw.c_cc[VMIN] = 0;
+  raw.c_cc[VTIME] = 0;
+
+  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) != 0)
+    die("tcsetattr failed: %s", strerror(errno));
+
+  // alt buffer, clear, hide cursor
+  write(STDOUT_FILENO, "\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l", 24);
+}
+
+static void get_termsize(int *w, int *h) {
+  struct winsize ws;
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0) {
+    *w = (int)ws.ws_col;
+    *h = (int)ws.ws_row;
+  } else {
+    *w = 80; *h = 24;
+  }
+}
+
+static void screen_init(Screen *s, int w, int h) {
+  s->w = w; s->h = h;
+  s->ch = (char*)malloc((size_t)w * (size_t)h);
+  s->col = (unsigned char*)malloc((size_t)w * (size_t)h);
+  if (!s->ch || !s->col) die("Out of memory");
+}
+
+static void screen_free(Screen *s) {
+  free(s->ch);
+  free(s->col);
+  memset(s, 0, sizeof(*s));
+}
+
+static void screen_clear(Screen *s) {
+  memset(s->ch, ' ', (size_t)s->w * (size_t)s->h);
+  memset(s->col, 0, (size_t)s->w * (size_t)s->h);
+}
+
+static void set_cell(Screen *s, int x, int y, char ch, unsigned char col) {
+  if (x < 0 || y < 0 || x >= s->w || y >= s->h) return;
+  size_t i = (size_t)y * (size_t)s->w + (size_t)x;
+  s->ch[i] = ch;
+  s->col[i] = col;
+}
+
+static void draw_text(Screen *s, int x, int y, unsigned char col, const char *txt) {
+  if (y < 0 || y >= s->h) return;
+  for (int i = 0; txt[i] && x + i < s->w; i++) {
+    set_cell(s, x + i, y, txt[i], col);
+  }
+}
+
+static const char* ansi_color(unsigned char c) {
+  switch (c) {
+    case C_RED:    return "\x1b[31m";
+    case C_GREEN:  return "\x1b[32m";
+    case C_YELLOW: return "\x1b[33m";
+    case C_BLUE:   return "\x1b[34m";
+    case C_MAG:    return "\x1b[35m";
+    case C_CYAN:   return "\x1b[36m";
+    case C_WHITE:  return "\x1b[37m";
+    case C_BORDER: return "\x1b[36m";
+    case C_TEXT:   return "\x1b[37m";
+    case C_DIM:    return "\x1b[90m";
+    case C_BRIGHT: return "\x1b[97m";
+    default:       return "\x1b[0m";
+  }
+}
+
+static void screen_render(Screen *s) {
+  // move cursor home
+  write(STDOUT_FILENO, "\x1b[H", 3);
+
+  unsigned char cur = 255;
+  for (int y = 0; y < s->h; y++) {
+    cur = 255;
+    for (int x = 0; x < s->w; x++) {
+      size_t i = (size_t)y * (size_t)s->w + (size_t)x;
+      unsigned char c = s->col[i];
+      if (c != cur) {
+        const char *seq = ansi_color(c);
+        write(STDOUT_FILENO, seq, strlen(seq));
+        cur = c;
+      }
+      char ch = s->ch[i];
+      write(STDOUT_FILENO, &ch, 1);
     }
+    write(STDOUT_FILENO, "\x1b[0m", 4);
+    if (y != s->h - 1) write(STDOUT_FILENO, "\r\n", 2);
+  }
 }
 
-static void cursor_hide(void) { printf("\033[?25l"); }
-static void cursor_show(void) { printf("\033[?25h"); }
-static void clear_screen(void) { printf("\033[2J\033[H"); }
-static void move_to(int row, int col) { printf("\033[%d;%dH", row, col); }
-static void clear_line(void) { printf("\033[2K"); }
+// ---------- File loading ----------
+static char* read_file_all(const char *path, size_t *outSize) {
+  FILE *f = fopen(path, "rb");
+  if (!f) die("Cannot open: %s", path);
+  fseek(f, 0, SEEK_END);
+  long n = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (n < 0) die("ftell failed");
 
-static double now_sec(void) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return tv.tv_sec + tv.tv_usec * 1e-6;
+  char *buf = (char*)malloc((size_t)n + 1);
+  if (!buf) die("Out of memory");
+  size_t r = fread(buf, 1, (size_t)n, f);
+  fclose(f);
+  buf[r] = 0;
+  if (outSize) *outSize = r;
+  return buf;
 }
 
-/* ─────────────────────────────────────────────
-   SIGNAL HANDLER
-───────────────────────────────────────────── */
-static void handle_signal(int sig) {
-    (void)sig;
-    g_running = 0;
+static void str_trim_inplace(char *s) {
+  if (!s) return;
+  size_t n = strlen(s);
+  while (n > 0 && (s[n-1] == '\r' || s[n-1] == '\n' || isspace((unsigned char)s[n-1])))
+    s[--n] = 0;
+  size_t i = 0;
+  while (s[i] && isspace((unsigned char)s[i])) i++;
+  if (i > 0) memmove(s, s + i, strlen(s + i) + 1);
 }
 
-static void handle_resize(int sig) {
-    (void)sig;
-    term_size();
+static int str_ieq(const char *a, const char *b) {
+  for (; *a && *b; a++, b++) {
+    if (tolower((unsigned char)*a) != tolower((unsigned char)*b)) return 0;
+  }
+  return *a == 0 && *b == 0;
 }
 
-/* ─────────────────────────────────────────────
-   STRING UTILITIES
-───────────────────────────────────────────── */
-static char *trim(char *s) {
-    while (*s && isspace((unsigned char)*s)) s++;
-    char *e = s + strlen(s);
-    while (e > s && isspace((unsigned char)*(e-1))) e--;
-    *e = '\0';
-    return s;
+static int contains_icase(const char *hay, const char *needle) {
+  if (!hay || !needle || !*needle) return 0;
+  size_t nl = strlen(needle);
+  for (const char *p = hay; *p; p++) {
+    size_t i = 0;
+    while (needle[i] && p[i] &&
+           tolower((unsigned char)needle[i]) == tolower((unsigned char)p[i])) i++;
+    if (i == nl) return 1;
+  }
+  return 0;
 }
 
-static void str_lower(char *s) {
-    for (; *s; s++) *s = tolower((unsigned char)*s);
+// Parse next #TAG:VALUE; from p. Returns new pointer after ';' or NULL.
+static const char* parse_next_tag(const char *p, char *tagOut, size_t tagCap, char **valOut) {
+  *valOut = NULL;
+  tagOut[0] = 0;
+  if (!p) return NULL;
+
+  // find '#'
+  while (*p && *p != '#') p++;
+  if (!*p) return NULL;
+  p++; // skip '#'
+
+  // read tag until ':'
+  size_t ti = 0;
+  while (*p && *p != ':' && *p != '\n' && *p != '\r') {
+    if (ti + 1 < tagCap) tagOut[ti++] = (char)toupper((unsigned char)*p);
+    p++;
+  }
+  tagOut[ti] = 0;
+  while (*p && *p != ':') p++;
+  if (!*p) return NULL;
+  p++; // skip ':'
+
+  // read value until ';' (may span lines)
+  const char *vstart = p;
+  while (*p && *p != ';') p++;
+  if (!*p) return NULL;
+  const char *vend = p; // not incl ';'
+
+  size_t vn = (size_t)(vend - vstart);
+  char *val = (char*)malloc(vn + 1);
+  if (!val) die("Out of memory");
+  memcpy(val, vstart, vn);
+  val[vn] = 0;
+
+  *valOut = val;
+  return p + 1; // after ';'
 }
 
-/* UTF-8 aware display-width truncation */
-static void print_fit(const char *s, int width) {
-    int w = 0;
-    while (*s && w < width) {
-        unsigned char c = (unsigned char)*s;
-        /* simple: count printable bytes, skip ANSI */
-        if (c == 0x1b) {
-            /* skip escape sequence */
-            s++;
-            if (*s == '[') {
-                s++;
-                while (*s && *s != 'm') s++;
-                if (*s) s++;
+// ---------- Simfile building ----------
+static void sim_init(Simfile *sf) {
+  memset(sf, 0, sizeof(*sf));
+  sf->offset = 0.0;
+}
+
+static void chart_init(Chart *c) {
+  memset(c, 0, sizeof(*c));
+  c->meter = 0;
+}
+
+static void sim_add_chart(Simfile *sf, Chart *c) {
+  if (sf->ncharts + 1 > sf->capcharts) {
+    sf->capcharts = sf->capcharts ? sf->capcharts * 2 : 8;
+    sf->charts = (Chart*)realloc(sf->charts, (size_t)sf->capcharts * sizeof(Chart));
+    if (!sf->charts) die("Out of memory");
+  }
+  sf->charts[sf->ncharts++] = *c; // struct copy (note buffers owned by chart)
+  chart_init(c);
+}
+
+static void chart_add_note(Chart *c, double beat, int col, int type) {
+  if (c->nnotes + 1 > c->capnotes) {
+    c->capnotes = c->capnotes ? c->capnotes * 2 : 1024;
+    c->notes = (Note*)realloc(c->notes, (size_t)c->capnotes * sizeof(Note));
+    if (!c->notes) die("Out of memory");
+  }
+  Note *n = &c->notes[c->nnotes++];
+  n->beat = beat;
+  n->time = 0.0;
+  n->col = col;
+  n->type = type;
+  n->hit = 0;
+}
+
+static int cmp_bpms(const void *A, const void *B) {
+  const BPMSeg *a = (const BPMSeg*)A, *b = (const BPMSeg*)B;
+  if (a->beat < b->beat) return -1;
+  if (a->beat > b->beat) return 1;
+  return 0;
+}
+
+static void parse_bpms(Simfile *sf, const char *val) {
+  // val: "0.000=120.000,64.000=150.000"
+  // Build temp array
+  BPMSeg *tmp = NULL;
+  int n = 0, cap = 0;
+
+  const char *p = val;
+  while (*p) {
+    while (*p && (isspace((unsigned char)*p) || *p == ',')) p++;
+    if (!*p) break;
+
+    char *end1 = NULL;
+    double beat = strtod(p, &end1);
+    if (end1 == p) break;
+    p = end1;
+    while (*p && *p != '=') p++;
+    if (*p != '=') break;
+    p++;
+
+    char *end2 = NULL;
+    double bpm = strtod(p, &end2);
+    if (end2 == p) break;
+    p = end2;
+
+    if (cap < n + 1) {
+      cap = cap ? cap * 2 : 8;
+      tmp = (BPMSeg*)realloc(tmp, (size_t)cap * sizeof(BPMSeg));
+      if (!tmp) die("Out of memory");
+    }
+    tmp[n++] = (BPMSeg){ .beat = beat, .bpm = bpm, .time = 0.0 };
+
+    while (*p && *p != ',') p++;
+  }
+
+  if (n == 0) { free(tmp); return; }
+
+  qsort(tmp, (size_t)n, sizeof(BPMSeg), cmp_bpms);
+
+  // Ensure beat 0 exists (StepMania usually does, but be defensive)
+  if (tmp[0].beat > 0.0) {
+    tmp = (BPMSeg*)realloc(tmp, (size_t)(n + 1) * sizeof(BPMSeg));
+    if (!tmp) die("Out of memory");
+    memmove(tmp + 1, tmp, (size_t)n * sizeof(BPMSeg));
+    tmp[0].beat = 0.0;
+    // use first bpm
+    tmp[0].bpm = tmp[1].bpm;
+    tmp[0].time = 0.0;
+    n++;
+  }
+
+  // Compute time at each segment start (relative, before OFFSET)
+  tmp[0].time = 0.0;
+  for (int i = 1; i < n; i++) {
+    double dbeat = tmp[i].beat - tmp[i-1].beat;
+    if (tmp[i-1].bpm <= 0.0) tmp[i-1].bpm = 120.0;
+    tmp[i].time = tmp[i-1].time + dbeat * 60.0 / tmp[i-1].bpm;
+  }
+
+  free(sf->bpms);
+  sf->bpms = tmp;
+  sf->nbpms = n;
+}
+
+static double beat_to_time(const Simfile *sf, double beat) {
+  if (!sf->bpms || sf->nbpms == 0) return beat * 60.0 / 120.0 - sf->offset;
+
+  int seg = 0;
+  // linear scan is fine for typical segment counts; could binary search
+  for (int i = 0; i < sf->nbpms; i++) {
+    if (sf->bpms[i].beat <= beat) seg = i;
+    else break;
+  }
+
+  double sb = sf->bpms[seg].beat;
+  double st = sf->bpms[seg].time;
+  double bpm = sf->bpms[seg].bpm > 0.0 ? sf->bpms[seg].bpm : 120.0;
+  double t = st + (beat - sb) * 60.0 / bpm;
+
+  // StepMania convention: time = beatSeconds - OFFSET
+  return t - sf->offset;
+}
+
+static void parse_note_data_into_chart(Chart *c, const char *noteData) {
+  // Measures separated by ','; each measure has N lines (rows), each row is "0000" etc.
+  // We'll treat '1','2','4' as note heads.
+  int measureIndex = 0;
+
+  // Collect rows of current measure
+  char **rows = NULL;
+  int nrows = 0, caprows = 0;
+
+  char line[256];
+  int li = 0;
+
+  const char *p = noteData;
+  while (1) {
+    char ch = *p;
+    if (ch == 0) {
+      // finalize if trailing
+      if (li > 0) {
+        line[li] = 0;
+        str_trim_inplace(line);
+        if ((int)strlen(line) >= 4 && strspn(line, "01234MKLmnklo") >= 4) {
+          if (nrows + 1 > caprows) {
+            caprows = caprows ? caprows * 2 : 64;
+            rows = (char**)realloc(rows, (size_t)caprows * sizeof(char*));
+            if (!rows) die("Out of memory");
+          }
+          rows[nrows++] = strdup(line);
+        }
+        li = 0;
+      }
+      // flush measure
+      if (nrows > 0) {
+        for (int r = 0; r < nrows; r++) {
+          double beat = (double)measureIndex * 4.0 + (double)r * (4.0 / (double)nrows);
+          for (int col = 0; col < 4; col++) {
+            char v = rows[r][col];
+            if (v == '1' || v == '2' || v == '4') chart_add_note(c, beat, col, 1);
+          }
+          free(rows[r]);
+        }
+        nrows = 0;
+        measureIndex++;
+      }
+      break;
+    }
+
+    if (ch == '\r') { p++; continue; }
+
+    if (ch == '\n' || ch == ',' ) {
+      line[li] = 0;
+      str_trim_inplace(line);
+      if (li > 0) {
+        // Only accept plausible note rows
+        if ((int)strlen(line) >= 4 &&
+            (line[0] == '0' || line[0] == '1' || line[0] == '2' || line[0] == '3' || line[0] == '4' || line[0] == 'M' || line[0] == 'K' || line[0] == 'L' ||
+             line[0] == 'm' || line[0] == 'k' || line[0] == 'l')) {
+          if (nrows + 1 > caprows) {
+            caprows = caprows ? caprows * 2 : 64;
+            rows = (char**)realloc(rows, (size_t)caprows * sizeof(char*));
+            if (!rows) die("Out of memory");
+          }
+          rows[nrows++] = strdup(line);
+        }
+      }
+      li = 0;
+
+      if (ch == ',') {
+        // end measure: convert rows
+        if (nrows > 0) {
+          for (int r = 0; r < nrows; r++) {
+            double beat = (double)measureIndex * 4.0 + (double)r * (4.0 / (double)nrows);
+            for (int col = 0; col < 4; col++) {
+              char v = rows[r][col];
+              if (v == '1' || v == '2' || v == '4') chart_add_note(c, beat, col, 1);
             }
-            continue;
+            free(rows[r]);
+          }
+          nrows = 0;
+          measureIndex++;
         }
-        putchar(*s++);
-        w++;
-    }
-    while (w++ < width) putchar(' ');
-}
+      }
 
-/* Draw a horizontal line */
-static void draw_hline(int row, int col, int len, const char *ch) {
-    move_to(row, col);
-    for (int i = 0; i < len; i++) printf("%s", ch);
-}
-
-/* Centered text */
-static void print_centered(int row, const char *s, int width) {
-    int slen = (int)strlen(s);
-    int pad  = (width - slen) / 2;
-    if (pad < 0) pad = 0;
-    move_to(row, 1 + pad);
-    printf("%s", s);
-}
-
-/* ─────────────────────────────────────────────
-   BPM / TIMING
-───────────────────────────────────────────── */
-/* Convert beat to seconds */
-static double beat_to_sec(Song *song, double beat) {
-    double sec = -song->offset;
-    double cur_beat = 0.0;
-    double cur_bpm  = 120.0;
-
-    for (int i = 0; i < song->bpm_count; i++) {
-        double nb = song->bpms[i].beat;
-        double next_beat = (i + 1 < song->bpm_count) ? song->bpms[i+1].beat : 1e18;
-        if (nb > beat) break;
-
-        double seg_end = (next_beat < beat) ? next_beat : beat;
-        sec += (seg_end - cur_beat) / cur_bpm * 60.0;
-
-        /* apply stops that fall in [cur_beat, seg_end] */
-        for (int j = 0; j < song->stop_count; j++) {
-            if (song->stops[j].beat >= cur_beat && song->stops[j].beat < seg_end)
-                sec += song->stops[j].duration;
-        }
-
-        cur_beat = seg_end;
-        cur_bpm  = song->bpms[i].bpm;
+      p++;
+      continue;
     }
 
-    if (cur_beat < beat) {
-        sec += (beat - cur_beat) / cur_bpm * 60.0;
-        for (int j = 0; j < song->stop_count; j++) {
-            if (song->stops[j].beat >= cur_beat && song->stops[j].beat < beat)
-                sec += song->stops[j].duration;
+    if (ch == ';') {
+      // end chart note data
+      if (li > 0) {
+        line[li] = 0;
+        str_trim_inplace(line);
+        if ((int)strlen(line) >= 4) {
+          if (nrows + 1 > caprows) {
+            caprows = caprows ? caprows * 2 : 64;
+            rows = (char**)realloc(rows, (size_t)caprows * sizeof(char*));
+            if (!rows) die("Out of memory");
+          }
+          rows[nrows++] = strdup(line);
         }
-    }
-    return sec;
-}
-
-/* Current BPM at a given time */
-static double bpm_at_time(Song *song, double t) {
-    double best_bpm = 120.0;
-    for (int i = 0; i < song->bpm_count; i++) {
-        double bt = beat_to_sec(song, song->bpms[i].beat);
-        if (bt <= t) best_bpm = song->bpms[i].bpm;
-        else break;
-    }
-    return best_bpm;
-}
-
-/* Convert seconds to beat */
-static double sec_to_beat(Song *song, double sec) {
-    double target = sec + song->offset;
-    double cur_sec  = 0.0;
-    double cur_beat = 0.0;
-    double cur_bpm  = 120.0;
-
-    for (int i = 0; i < song->bpm_count; i++) {
-        if (song->bpms[i].beat > cur_beat) {
-            double seg_beats = song->bpms[i].beat - cur_beat;
-            double seg_secs  = seg_beats / cur_bpm * 60.0;
-            if (cur_sec + seg_secs >= target) {
-                return cur_beat + (target - cur_sec) * cur_bpm / 60.0;
-            }
-            cur_sec  += seg_secs;
-            cur_beat += seg_beats;
+        li = 0;
+      }
+      if (nrows > 0) {
+        for (int r = 0; r < nrows; r++) {
+          double beat = (double)measureIndex * 4.0 + (double)r * (4.0 / (double)nrows);
+          for (int col = 0; col < 4; col++) {
+            char v = rows[r][col];
+            if (v == '1' || v == '2' || v == '4') chart_add_note(c, beat, col, 1);
+          }
+          free(rows[r]);
         }
-        cur_bpm = song->bpms[i].bpm;
-    }
-    return cur_beat + (target - cur_sec) * cur_bpm / 60.0;
-}
-
-/* ─────────────────────────────────────────────
-   PARSER  — .sm and .ssc
-───────────────────────────────────────────── */
-static void parse_bpm_string(Song *song, const char *s) {
-    song->bpm_count = 0;
-    char buf[65536];
-    strncpy(buf, s, sizeof(buf)-1);
-    buf[sizeof(buf)-1] = '\0';
-    char *tok = strtok(buf, ",");
-    while (tok && song->bpm_count < MAX_BPM_SEGS) {
-        char *eq = strchr(tok, '=');
-        if (eq) {
-            *eq = '\0';
-            song->bpms[song->bpm_count].beat = atof(trim(tok));
-            song->bpms[song->bpm_count].bpm  = atof(trim(eq+1));
-            song->bpm_count++;
-        }
-        tok = strtok(NULL, ",");
-    }
-}
-
-static void parse_stop_string(Song *song, const char *s) {
-    song->stop_count = 0;
-    char buf[65536];
-    strncpy(buf, s, sizeof(buf)-1);
-    buf[sizeof(buf)-1] = '\0';
-    char *tok = strtok(buf, ",");
-    while (tok && song->stop_count < MAX_STOP_SEGS) {
-        char *eq = strchr(tok, '=');
-        if (eq) {
-            *eq = '\0';
-            song->stops[song->stop_count].beat     = atof(trim(tok));
-            song->stops[song->stop_count].duration = atof(trim(eq+1));
-            song->stop_count++;
-        }
-        tok = strtok(NULL, ",");
-    }
-}
-
-static int numcols_for_type(const char *t) {
-    if (strstr(t, "single"))    return 4;
-    if (strstr(t, "double"))    return 8;
-    if (strstr(t, "solo"))      return 6;
-    if (strstr(t, "couple"))    return 8;
-    if (strstr(t, "routine"))   return 8;
-    if (strstr(t, "3panel"))    return 3;
-    if (strstr(t, "5panel"))    return 5;
-    if (strstr(t, "versus"))    return 8;
-    return 4;
-}
-
-/* Parse the note data block (measures separated by commas) */
-static void parse_notes_block(Chart *chart, const char *data) {
-    chart->note_count = 0;
-    const char *p = data;
-    int   measure  = 0;
-
-    while (*p && chart->note_count < MAX_NOTES) {
-        /* skip whitespace */
-        while (*p && (isspace((unsigned char)*p) || *p == '\r')) p++;
-        if (!*p) break;
-
-        /* collect all rows until next comma or end */
-        const char *measure_start = p;
-        /* find measure end */
-        const char *mend = p;
-        int depth = 0;
-        while (*mend) {
-            if (*mend == ',') break;
-            mend++;
-        }
-
-        /* count rows in this measure */
-        const char *q = measure_start;
-        int rows = 0;
-        while (q < mend) {
-            while (q < mend && (isspace((unsigned char)*q) || *q == '\r')) q++;
-            if (q >= mend) break;
-            /* skip comment lines */
-            if (*q == '/' && *(q+1) == '/') {
-                while (q < mend && *q != '\n') q++;
-                continue;
-            }
-            /* count chars in this row */
-            int rowlen = 0;
-            const char *rowstart = q;
-            while (q < mend && *q != '\n' && *q != '\r') { q++; rowlen++; }
-            if (rowlen >= chart->numcols) rows++;
-            (void)rowstart;
-        }
-        if (rows == 0) rows = 1;
-
-        /* parse rows */
-        q = measure_start;
-        int row_idx = 0;
-        while (q < mend) {
-            while (q < mend && (isspace((unsigned char)*q) || *q == '\r')) q++;
-            if (q >= mend) break;
-            if (*q == '/' && *(q+1) == '/') {
-                while (q < mend && *q != '\n') q++;
-                continue;
-            }
-            int rowlen = 0;
-            const char *rowstart = q;
-            while (q < mend && *q != '\n' && *q != '\r') { q++; rowlen++; }
-            if (rowlen < chart->numcols) continue;
-
-            double beat = measure * 4.0 + (double)row_idx / rows * 4.0;
-            int has_note = 0;
-            for (int c = 0; c < chart->numcols && c < rowlen; c++) {
-                if (rowstart[c] != NT_NONE) has_note = 1;
-            }
-            if (has_note && chart->note_count < MAX_NOTES) {
-                chart->notes[chart->note_count].beat = beat;
-                for (int c = 0; c < chart->numcols && c < rowlen; c++)
-                    chart->notes[chart->note_count].note[c] = rowstart[c];
-                chart->note_count++;
-            }
-            row_idx++;
-        }
-
-        measure++;
-        if (*mend == ',') p = mend + 1;
-        else break;
-    }
-}
-
-/* ── .sm parser ── */
-static int parse_sm(Song *song, const char *filepath) {
-    FILE *f = fopen(filepath, "r");
-    if (!f) return 0;
-
-    fseek(f, 0, SEEK_END);
-    long fsz = ftell(f);
-    rewind(f);
-    char *buf = malloc(fsz + 1);
-    if (!buf) { fclose(f); return 0; }
-    fread(buf, 1, fsz, f);
-    buf[fsz] = '\0';
-    fclose(f);
-
-    strncpy(song->filepath, filepath, sizeof(song->filepath)-1);
-    song->chart_count = 0;
-    song->bpm_count   = 0;
-    song->stop_count  = 0;
-    song->offset      = 0.0;
-
-    char *p = buf;
-    while (*p) {
-        /* skip to next # */
-        while (*p && *p != '#') p++;
-        if (!*p) break;
-        p++; /* skip # */
-
-        /* read tag */
-        char tag[64] = {0};
-        int ti = 0;
-        while (*p && *p != ':' && ti < 63) tag[ti++] = *p++;
-        tag[ti] = '\0';
-        if (*p == ':') p++;
-
-        /* read value until ; */
-        char *vstart = p;
-        int depth = 0;
-        while (*p) {
-            if (*p == '{') depth++;
-            else if (*p == '}') depth--;
-            else if (*p == ';' && depth == 0) break;
-            p++;
-        }
-        /* value is [vstart, p) */
-        int vlen = (int)(p - vstart);
-        char *val = malloc(vlen + 1);
-        memcpy(val, vstart, vlen);
-        val[vlen] = '\0';
-        char *tval = trim(val);
-
-        char TAG[64];
-        strncpy(TAG, tag, 63);
-        str_lower(TAG);
-
-        if      (!strcmp(TAG, "title"))    strncpy(song->title,    tval, MAX_TITLE-1);
-        else if (!strcmp(TAG, "subtitle")) strncpy(song->subtitle, tval, MAX_TITLE-1);
-        else if (!strcmp(TAG, "artist"))   strncpy(song->artist,   tval, MAX_ARTIST-1);
-        else if (!strcmp(TAG, "offset"))   song->offset = -atof(tval); /* sm offset is negated */
-        else if (!strcmp(TAG, "bpms"))     parse_bpm_string(song, tval);
-        else if (!strcmp(TAG, "stops"))    parse_stop_string(song, tval);
-        else if (!strcmp(TAG, "notes") && song->chart_count < MAX_CHARTS) {
-            /* 5 colon-separated fields: type : desc : diff : meter : radar
-               then the note data */
-            Chart *ch = &song->charts[song->chart_count];
-            memset(ch, 0, sizeof(*ch));
-            /* parse the 5 fields */
-            char tmp[65536];
-            strncpy(tmp, tval, sizeof(tmp)-1);
-            char *fields[6];
-            char *fp = tmp;
-            for (int fi = 0; fi < 5; fi++) {
-                fields[fi] = fp;
-                char *colon = strchr(fp, ':');
-                if (colon) { *colon = '\0'; fp = colon + 1; }
-                else { fp = fp + strlen(fp); }
-                fields[fi] = trim(fields[fi]);
-            }
-            strncpy(ch->stepstype,   fields[0], 31);
-            strncpy(ch->description, fields[1], 127);
-            strncpy(ch->difficulty,  fields[2], MAX_DIFF-1);
-            ch->meter   = atoi(fields[3]);
-            ch->numcols = numcols_for_type(ch->stepstype);
-            /* fp now points to note data */
-            parse_notes_block(ch, fp);
-            song->chart_count++;
-        }
-
-        free(val);
-        if (*p == ';') p++;
+        nrows = 0;
+        measureIndex++;
+      }
+      break;
     }
 
-    /* Fix offset sign convention */
-    /* In .sm: #OFFSET is subtracted from song time. We stored as -atof above,
-       so beat_to_sec already adds -offset to start. Keep consistent. */
-    /* Actually let's just store raw and handle in beat_to_sec */
-    song->offset = -song->offset; /* revert: store as positive seconds to skip */
-    /* beat_to_sec does: sec = -song->offset initially, meaning music starts
-       at beat 0 when t = offset */
+    if (li + 1 < (int)sizeof(line)) line[li++] = ch;
+    p++;
+  }
 
-    free(buf);
-    return song->chart_count > 0 || song->bpm_count > 0;
+  free(rows);
 }
 
-/* ── .ssc parser ── */
-static int parse_ssc(Song *song, const char *filepath) {
-    FILE *f = fopen(filepath, "r");
-    if (!f) return 0;
+static void finalize_chart_times(const Simfile *sf, Chart *c) {
+  for (int i = 0; i < c->nnotes; i++) {
+    c->notes[i].time = beat_to_time(sf, c->notes[i].beat);
+  }
+}
 
-    fseek(f, 0, SEEK_END);
-    long fsz = ftell(f);
-    rewind(f);
-    char *buf = malloc(fsz + 1);
-    if (!buf) { fclose(f); return 0; }
-    fread(buf, 1, fsz, f);
-    buf[fsz] = '\0';
-    fclose(f);
+static int cmp_note_time_idx(const void *A, const void *B, void *ctx) {
+  const Chart *c = (const Chart*)ctx;
+  int ia = *(const int*)A, ib = *(const int*)B;
+  double ta = c->notes[ia].time, tb = c->notes[ib].time;
+  if (ta < tb) return -1;
+  if (ta > tb) return 1;
+  return 0;
+}
 
-    strncpy(song->filepath, filepath, sizeof(song->filepath)-1);
-    song->chart_count = 0;
-    song->bpm_count   = 0;
-    song->stop_count  = 0;
-    song->offset      = 0.0;
+static void chart_build_col_indices(Chart *c) {
+  for (int col = 0; col < 4; col++) {
+    free(c->colIdx[col]);
+    c->colIdx[col] = NULL;
+    c->nCol[col] = 0;
+    c->ptrCol[col] = 0;
+  }
 
-    Chart *cur_chart = NULL;
-    int in_notedata  = 0;
+  // Count
+  for (int i = 0; i < c->nnotes; i++) {
+    int col = c->notes[i].col;
+    if (col >= 0 && col < 4) c->nCol[col]++;
+  }
 
-    char *p = buf;
-    while (*p) {
-        while (*p && *p != '#') p++;
-        if (!*p) break;
-        p++;
+  // Allocate
+  int pos[4] = {0,0,0,0};
+  for (int col = 0; col < 4; col++) {
+    if (c->nCol[col] > 0) {
+      c->colIdx[col] = (int*)malloc((size_t)c->nCol[col] * sizeof(int));
+      if (!c->colIdx[col]) die("Out of memory");
+    }
+  }
 
-        char tag[64] = {0};
-        int ti = 0;
-        while (*p && *p != ':' && ti < 63) tag[ti++] = *p++;
-        tag[ti] = '\0';
-        if (*p == ':') p++;
+  // Fill
+  for (int i = 0; i < c->nnotes; i++) {
+    int col = c->notes[i].col;
+    if (col >= 0 && col < 4) c->colIdx[col][pos[col]++] = i;
+  }
 
-        char *vstart = p;
-        while (*p && !(*p == ';')) p++;
-        int vlen = (int)(p - vstart);
-        char *val = malloc(vlen + 1);
-        memcpy(val, vstart, vlen);
-        val[vlen] = '\0';
-        char *tval = trim(val);
+  // Sort each column by time
+#if defined(__APPLE__)
+  // qsort_r on macOS: qsort_r(base, nmemb, size, thunk, compar)
+  for (int col = 0; col < 4; col++) {
+    if (c->colIdx[col] && c->nCol[col] > 1) {
+      qsort_r(c->colIdx[col], (size_t)c->nCol[col], sizeof(int), (void*)c, cmp_note_time_idx);
+    }
+  }
+#else
+  // fallback: stable enough if notes already ordered; omit
+  (void)cmp_note_time_idx;
+#endif
+}
 
-        char TAG[64];
-        strncpy(TAG, tag, 63);
-        str_lower(TAG);
+static int parse_sm_notes_fields(char *val, char **outFields, int maxFields) {
+  // Split by ':' into up to maxFields fields; modifies val in place.
+  int n = 0;
+  char *p = val;
+  while (n < maxFields) {
+    outFields[n++] = p;
+    char *c = strchr(p, ':');
+    if (!c) break;
+    *c = 0;
+    p = c + 1;
+  }
+  return n;
+}
 
-        if (!strcmp(TAG, "notedata")) {
-            if (song->chart_count < MAX_CHARTS) {
-                cur_chart = &song->charts[song->chart_count];
-                memset(cur_chart, 0, sizeof(*cur_chart));
-                in_notedata = 1;
-            }
-        } else if (!strcmp(TAG, "endnotedata") || !strcmp(TAG, "#endnotedata")) {
-            if (cur_chart && in_notedata) {
-                song->chart_count++;
-                cur_chart = NULL;
-                in_notedata = 0;
-            }
-        }
+static void parse_simfile_text(Simfile *sf, const char *text) {
+  // Heuristic: if it has #NOTEDATA, treat as .ssc-like; otherwise .sm-like.
+  bool isSSC = contains_icase(text, "#NOTEDATA");
 
-        if (!in_notedata || !cur_chart) {
-            if      (!strcmp(TAG, "title"))    strncpy(song->title,    tval, MAX_TITLE-1);
-            else if (!strcmp(TAG, "subtitle")) strncpy(song->subtitle, tval, MAX_TITLE-1);
-            else if (!strcmp(TAG, "artist"))   strncpy(song->artist,   tval, MAX_ARTIST-1);
-            else if (!strcmp(TAG, "offset"))   song->offset = atof(tval);
-            else if (!strcmp(TAG, "bpms"))     parse_bpm_string(song, tval);
-            else if (!strcmp(TAG, "stops"))    parse_stop_string(song, tval);
-        } else {
-            if      (!strcmp(TAG, "stepstype")) {
-                strncpy(cur_chart->stepstype, tval, 31);
-                cur_chart->numcols = numcols_for_type(tval);
-            }
-            else if (!strcmp(TAG, "description")) strncpy(cur_chart->description, tval, 127);
-            else if (!strcmp(TAG, "difficulty"))  strncpy(cur_chart->difficulty,  tval, MAX_DIFF-1);
-            else if (!strcmp(TAG, "meter"))        cur_chart->meter = atoi(tval);
-            else if (!strcmp(TAG, "notes"))        parse_notes_block(cur_chart, tval);
-        }
+  const char *p = text;
+  char tag[128];
+  char *val = NULL;
 
-        free(val);
-        if (*p == ';') p++;
+  Chart cur;
+  chart_init(&cur);
+  bool inSSCChart = false;
+
+  while ((p = parse_next_tag(p, tag, sizeof(tag), &val)) != NULL) {
+    str_trim_inplace(val);
+
+    if (str_ieq(tag, "TITLE")) {
+      snprintf(sf->title, sizeof(sf->title), "%s", val);
+    } else if (str_ieq(tag, "OFFSET")) {
+      sf->offset = strtod(val, NULL);
+    } else if (str_ieq(tag, "BPMS")) {
+      parse_bpms(sf, val);
     }
 
-    /* If notedata wasn't closed */
-    if (in_notedata && cur_chart) song->chart_count++;
+    if (!isSSC) {
+      if (str_ieq(tag, "NOTES")) {
+        // .sm #NOTES has colon-separated fields
+        char *fields[8] = {0};
+        int nf = parse_sm_notes_fields(val, fields, 8);
 
-    free(buf);
-    return 1;
-}
+        // Expected: 6 fields. Field 0: stepstype, 2: difficulty, 3: meter, 5: notedata
+        if (nf >= 6) {
+          char *stepstype = fields[0];
+          char *difficulty = fields[2];
+          char *meter = fields[3];
+          char *notedata = fields[5];
 
-/* ─────────────────────────────────────────────
-   FILE BROWSER / LOADER
-───────────────────────────────────────────── */
-static int ends_with(const char *s, const char *suf) {
-    int sl = strlen(s), sufl = strlen(suf);
-    if (sl < sufl) return 0;
-    return strcasecmp(s + sl - sufl, suf) == 0;
-}
+          str_trim_inplace(stepstype);
+          str_trim_inplace(difficulty);
+          str_trim_inplace(meter);
 
-static void scan_dir(const char *dirpath) {
-    DIR *d = opendir(dirpath);
-    if (!d) return;
-    struct dirent *ent;
-    while ((ent = readdir(d)) && g_song_count < 128) {
-        if (ent->d_name[0] == '.') continue;
-        char path[1024];
-        snprintf(path, sizeof(path), "%s/%s", dirpath, ent->d_name);
+          Chart c;
+          chart_init(&c);
+          snprintf(c.stepstype, sizeof(c.stepstype), "%s", stepstype);
+          snprintf(c.difficulty, sizeof(c.difficulty), "%s", difficulty);
+          c.meter = (int)strtol(meter, NULL, 10);
 
-        if (ent->d_type == DT_DIR) {
-            scan_dir(path);
-        } else if (ends_with(ent->d_name, ".sm") || ends_with(ent->d_name, ".ssc")) {
-            Song *s = &g_songs[g_song_count];
-            memset(s, 0, sizeof(*s));
-            int ok = 0;
-            if (ends_with(ent->d_name, ".ssc")) ok = parse_ssc(s, path);
-            else                                  ok = parse_sm(s,  path);
-            if (ok && (s->chart_count > 0)) {
-                if (!s->title[0]) strncpy(s->title, ent->d_name, MAX_TITLE-1);
-                g_song_count++;
-            }
+          if (contains_icase(c.stepstype, "dance-single")) {
+            parse_note_data_into_chart(&c, notedata);
+            sim_add_chart(sf, &c);
+          } else {
+            // discard unsupported chart
+            free(c.notes);
+          }
         }
-    }
-    closedir(d);
-}
-
-/* ─────────────────────────────────────────────
-   GAME LOGIC
-───────────────────────────────────────────── */
-static void init_play(Song *song, Chart *chart) {
-    g_song  = song;
-    g_chart = chart;
-    memset(&g_score, 0, sizeof(g_score));
-    memset(g_col_flash, 0, sizeof(g_col_flash));
-    memset(g_col_flash_judge, 0, sizeof(g_col_flash_judge));
-    memset(g_hold_held, 0, sizeof(g_hold_held));
-    g_judge_flash_time = 0;
-    g_last_judge = JDG_NONE;
-    g_song_time  = -3.0;
-    g_paused     = 0;
-    g_anote_count = 0;
-
-    /* Pre-compute timing for each note */
-    for (int i = 0; i < chart->note_count && g_anote_count < MAX_NOTES; i++) {
-        NoteRow *row = &chart->notes[i];
-        for (int c = 0; c < chart->numcols; c++) {
-            char nt = row->note[c];
-            if (nt == NT_NONE) continue;
-            /* Find hold end */
-            double hold_end = row->beat;
-            if (nt == NT_HOLD_S || nt == NT_ROLL_S) {
-                for (int j = i+1; j < chart->note_count; j++) {
-                    if (chart->notes[j].note[c] == NT_HOLD_E) {
-                        hold_end = chart->notes[j].beat;
-                        break;
-                    }
-                }
-            }
-            ActiveNote *an = &g_anotes[g_anote_count++];
-            an->beat        = row->beat;
-            an->time        = beat_to_sec(song, row->beat);
-            an->col         = c;
-            an->type        = nt;
-            an->judged      = 0;
-            an->hold_active = 0;
-            an->hold_end_beat = hold_end;
-            if (nt == NT_TAP || nt == NT_HOLD_S || nt == NT_ROLL_S || nt == NT_MINE)
-                g_score.total_taps++;
-        }
-    }
-}
-
-/* Windows: timing thresholds (seconds) */
-static const double jdg_windows[] = {
-    0.0225, /* Marvelous */
-    0.045,  /* Perfect   */
-    0.090,  /* Great     */
-    0.135,  /* Good      */
-    0.180,  /* Bad       */
-};
-
-static int judge_offset(double offset) {
-    double abs_off = fabs(offset);
-    if (abs_off <= jdg_windows[0]) return JDG_MARV;
-    if (abs_off <= jdg_windows[1]) return JDG_PERF;
-    if (abs_off <= jdg_windows[2]) return JDG_GREAT;
-    if (abs_off <= jdg_windows[3]) return JDG_GOOD;
-    if (abs_off <= jdg_windows[4]) return JDG_BAD;
-    return JDG_MISS;
-}
-
-static void apply_judgement(int j) {
-    g_last_judge = j;
-    g_judge_flash_time = now_sec();
-    switch (j) {
-        case JDG_MARV:  g_score.marv++;  g_score.combo++; break;
-        case JDG_PERF:  g_score.perf++;  g_score.combo++; break;
-        case JDG_GREAT: g_score.great++; g_score.combo++; break;
-        case JDG_GOOD:  g_score.good++;  g_score.combo++; break;
-        case JDG_BAD:   g_score.bad++;   g_score.combo=0; break;
-        case JDG_MISS:  g_score.miss++;  g_score.combo=0; break;
-    }
-    if (g_score.combo > g_score.max_combo)
-        g_score.max_combo = g_score.combo;
-
-    /* Score calc */
-    double total = g_score.total_taps > 0 ? g_score.total_taps : 1;
-    double pts   = (g_score.marv  * 5 + g_score.perf  * 4 +
-                    g_score.great * 2 + g_score.good   * 1) / (total * 5.0);
-    g_score.score = pts * 100.0;
-}
-
-static void col_press(int col) {
-    if (col < 0 || col >= g_chart->numcols) return;
-    g_hold_held[col] = 1;
-
-    double best_off  = 1e9;
-    int    best_idx  = -1;
-
-    for (int i = 0; i < g_anote_count; i++) {
-        ActiveNote *an = &g_anotes[i];
-        if (an->col != col) continue;
-        if (an->judged) continue;
-        if (an->type != NT_TAP && an->type != NT_HOLD_S && an->type != NT_ROLL_S) continue;
-        double off = g_song_time - an->time;
-        if (off < -jdg_windows[4]) continue; /* too early */
-        if (off >  jdg_windows[4]) { /* missed — will be caught in update */ continue; }
-        if (fabs(off) < fabs(best_off)) {
-            best_off = off;
-            best_idx = i;
-        }
-    }
-
-    if (best_idx >= 0) {
-        int j = judge_offset(best_off);
-        g_anotes[best_idx].judged = j;
-        if (g_anotes[best_idx].type == NT_HOLD_S || g_anotes[best_idx].type == NT_ROLL_S)
-            g_anotes[best_idx].hold_active = 1;
-        apply_judgement(j);
-        g_col_flash[col] = now_sec();
-        g_col_flash_judge[col] = j;
+      }
     } else {
-        /* Check mines */
-        for (int i = 0; i < g_anote_count; i++) {
-            ActiveNote *an = &g_anotes[i];
-            if (an->col != col || an->judged) continue;
-            if (an->type == NT_MINE) {
-                double off = g_song_time - an->time;
-                if (fabs(off) <= jdg_windows[2]) {
-                    an->judged = JDG_MISS;
-                    apply_judgement(JDG_BAD);
-                    g_col_flash[col] = now_sec();
-                    g_col_flash_judge[col] = JDG_MISS;
-                }
-            }
+      // .ssc: charts are in #NOTEDATA blocks
+      if (str_ieq(tag, "NOTEDATA")) {
+        if (inSSCChart) {
+          // finalize previous chart if it has notes
+          if (cur.nnotes > 0 && contains_icase(cur.stepstype, "dance-single")) {
+            sim_add_chart(sf, &cur);
+          } else {
+            free(cur.notes);
+          }
+          chart_init(&cur);
         }
-    }
-}
-
-static void col_release(int col) {
-    if (col < 0 || col >= g_chart->numcols) return;
-    g_hold_held[col] = 0;
-}
-
-static void update_notes(void) {
-    for (int i = 0; i < g_anote_count; i++) {
-        ActiveNote *an = &g_anotes[i];
-        if (an->judged) continue;
-
-        double off = g_song_time - an->time;
-
-        /* Auto-miss */
-        if (off > jdg_windows[4] + 0.05) {
-            an->judged = JDG_MISS;
-            apply_judgement(JDG_MISS);
-            continue;
+        inSSCChart = true;
+      } else if (inSSCChart && str_ieq(tag, "STEPSTYPE")) {
+        snprintf(cur.stepstype, sizeof(cur.stepstype), "%s", val);
+      } else if (inSSCChart && str_ieq(tag, "DIFFICULTY")) {
+        snprintf(cur.difficulty, sizeof(cur.difficulty), "%s", val);
+      } else if (inSSCChart && str_ieq(tag, "METER")) {
+        cur.meter = (int)strtol(val, NULL, 10);
+      } else if (inSSCChart && str_ieq(tag, "NOTES")) {
+        if (contains_icase(cur.stepstype, "dance-single")) {
+          parse_note_data_into_chart(&cur, val);
         }
-
-        /* Hold tracking */
-        if (an->hold_active) {
-            double end_time = beat_to_sec(g_song, an->hold_end_beat);
-            if (g_song_time >= end_time) {
-                an->judged = JDG_PERF;
-                if (!g_hold_held[an->col]) an->judged = JDG_BAD;
-                /* No apply_judgement for hold end, handled at start */
-                an->judged = JDG_PERF; /* mark done */
-            } else if (!g_hold_held[an->col]) {
-                /* dropped hold */
-                an->judged = JDG_BAD;
-            }
-        }
+      }
     }
-}
 
-/* ─────────────────────────────────────────────
-   RENDERING
-───────────────────────────────────────────── */
+    free(val);
+    val = NULL;
+  }
 
-/* Note color by beat subdivision */
-static const char *note_color(double beat) {
-    double frac = beat - floor(beat);
-    /* quantize to 48th */
-    int q = (int)round(frac * 48);
-    q = q % 48;
-    if (q == 0)  return COL_BWHITE;   /* 4th  */
-    if (q % 12 == 0) return COL_BBLUE;   /* 4th  */
-    if (q % 8  == 0) return COL_BMAGENTA;/* 6th  */
-    if (q % 6  == 0) return COL_BYELLOW; /* 8th  */
-    if (q % 4  == 0) return COL_BCYAN;   /* 12th */
-    if (q % 3  == 0) return COL_BGREEN;  /* 16th */
-    return COL_BRED;                      /* 24th+*/
-}
-
-/* Column key chars for different game modes */
-static const char *col_char(int numcols, int col) {
-    static const char *single4[] = {"←","↓","↑","→"};
-    static const char *single6[] = {"←","↙","↓","↑","↗","→"};
-    static const char *double8[] = {"←","↓","↑","→","←","↓","↑","→"};
-    if (numcols == 4 && col < 4) return single4[col];
-    if (numcols == 6 && col < 6) return single6[col];
-    if (numcols == 8 && col < 8) return double8[col];
-    return "·";
-}
-
-static const char *col_lane_color(int numcols, int col) {
-    /* Left-right color coding */
-    static const char *s4[] = {COL_BBLUE, COL_BRED, COL_BYELLOW, COL_BBLUE};
-    static const char *s6[] = {COL_BBLUE,COL_BCYAN,COL_BRED,COL_BGREEN,COL_BCYAN,COL_BBLUE};
-    static const char *d8[] = {COL_BBLUE,COL_BRED,COL_BYELLOW,COL_BBLUE,
-                                COL_BBLUE,COL_BRED,COL_BYELLOW,COL_BBLUE};
-    if (numcols == 4 && col < 4) return s4[col];
-    if (numcols == 6 && col < 6) return s6[col];
-    if (numcols == 8 && col < 8) return d8[col];
-    return COL_WHITE;
-}
-
-static const char *judge_str(int j) {
-    switch (j) {
-        case JDG_MARV:  return COL_BWHITE  "✦ Marvelous";
-        case JDG_PERF:  return COL_BYELLOW "★ Perfect  ";
-        case JDG_GREAT: return COL_BGREEN  "◆ Great    ";
-        case JDG_GOOD:  return COL_BCYAN   "● Good     ";
-        case JDG_BAD:   return COL_BRED    "▼ Bad      ";
-        case JDG_MISS:  return COL_RED     "✕ Miss     ";
-        default:        return "           ";
-    }
-}
-
-static const char *judge_color(int j) {
-    switch (j) {
-        case JDG_MARV:  return COL_BWHITE;
-        case JDG_PERF:  return COL_BYELLOW;
-        case JDG_GREAT: return COL_BGREEN;
-        case JDG_GOOD:  return COL_BCYAN;
-        case JDG_BAD:   return COL_BRED;
-        case JDG_MISS:  return COL_RED;
-        default:        return COL_WHITE;
-    }
-}
-
-static void draw_border(int r1, int c1, int r2, int c2) {
-    /* corners */
-    move_to(r1, c1); printf("╔");
-    move_to(r1, c2); printf("╗");
-    move_to(r2, c1); printf("╚");
-    move_to(r2, c2); printf("╝");
-    /* top/bottom */
-    for (int c = c1+1; c < c2; c++) { move_to(r1, c); printf("═"); }
-    for (int c = c1+1; c < c2; c++) { move_to(r2, c); printf("═"); }
-    /* sides */
-    for (int r = r1+1; r < r2; r++) { move_to(r, c1); printf("║"); }
-    for (int r = r1+1; r < r2; r++) { move_to(r, c2); printf("║"); }
-}
-
-/* ── MENU SCREEN ── */
-static void render_menu(void) {
-    int w = g_term_w, h = g_term_h;
-    move_to(1, 1);
-
-    /* Title banner */
-    printf(BG_BLACK COL_RESET);
-    for (int r = 1; r <= h; r++) { move_to(r, 1); clear_line(); }
-
-    /* Header */
-    printf(COL_BMAGENTA COL_BOLD);
-    print_centered(2, "╔══════════════════════════════╗", w);
-    print_centered(3, "║   ♪  StepMania Terminal  ♪   ║", w);
-    print_centered(4, "╚══════════════════════════════╝", w);
-    printf(COL_RESET);
-
-    printf(COL_DIM);
-    print_centered(6, "Drop a song folder to scan, or pass a .sm/.ssc file as argument", w);
-    printf(COL_RESET);
-
-    if (g_song_count == 0) {
-        printf(COL_BYELLOW);
-        print_centered(9,  "No songs found.", w);
-        print_centered(10, "Usage: stepmania [path/to/songs/]", w);
-        printf(COL_RESET);
-        printf(COL_DIM);
-        print_centered(12, "Press  Q  to quit", w);
-        printf(COL_RESET);
+  // finalize last .ssc chart
+  if (isSSC && inSSCChart) {
+    if (cur.nnotes > 0 && contains_icase(cur.stepstype, "dance-single")) {
+      sim_add_chart(sf, &cur);
     } else {
-        printf(COL_BGREEN);
-        char tmp[64];
-        snprintf(tmp, sizeof(tmp), "%d song%s loaded", g_song_count, g_song_count==1?"":"s");
-        print_centered(8, tmp, w);
-        printf(COL_RESET);
-        printf(COL_BCYAN);
-        print_centered(10, "Press  ENTER  to browse songs", w);
-        print_centered(11, "Press  Q  to quit", w);
-        printf(COL_RESET);
+      free(cur.notes);
     }
+  }
 
-    /* Footer */
-    printf(COL_DIM);
-    print_centered(h-1, "↑↓ Navigate  ·  Enter Select  ·  Q Quit", w);
-    printf(COL_RESET);
+  // If title missing, set a fallback
+  if (sf->title[0] == 0) snprintf(sf->title, sizeof(sf->title), "Untitled");
+
+  // If BPMs missing, default
+  if (!sf->bpms || sf->nbpms == 0) {
+    parse_bpms(sf, "0=120");
+  }
+
+  // Finalize charts: compute times, build column indices
+  for (int i = 0; i < sf->ncharts; i++) {
+    finalize_chart_times(sf, &sf->charts[i]);
+    chart_build_col_indices(&sf->charts[i]);
+  }
 }
 
-/* ── SELECT SCREEN ── */
-static void render_select(void) {
-    int w = g_term_w, h = g_term_h;
-    for (int r = 1; r <= h; r++) { move_to(r, 1); clear_line(); }
-
-    /* Header */
-    printf(COL_BMAGENTA COL_BOLD);
-    print_centered(1, "♪  Song Select  ♪", w);
-    printf(COL_RESET);
-
-    move_to(2, 1);
-    for (int c = 0; c < w; c++) printf("─");
-
-    /* Song list */
-    int list_h    = h - 10;
-    int list_top  = 3;
-
-    /* Adjust scroll */
-    if (g_song_sel < g_scroll_off) g_scroll_off = g_song_sel;
-    if (g_song_sel >= g_scroll_off + list_h) g_scroll_off = g_song_sel - list_h + 1;
-
-    for (int i = 0; i < list_h; i++) {
-        int si = g_scroll_off + i;
-        int row = list_top + i;
-        move_to(row, 1);
-        if (si >= g_song_count) { clear_line(); continue; }
-
-        Song *s = &g_songs[si];
-        if (si == g_song_sel) {
-            printf(COL_BOLD "\033[48;5;236m" COL_BWHITE " ▶ ");
-        } else {
-            printf(COL_RESET "   ");
-        }
-
-        /* Title + artist */
-        char line[256];
-        if (s->subtitle[0])
-            snprintf(line, sizeof(line), "%-40s  %s - %s",
-                s->title, s->subtitle, s->artist);
-        else
-            snprintf(line, sizeof(line), "%-40s  %s",
-                s->title, s->artist);
-
-        printf(COL_BWHITE);
-        print_fit(line, w - 5);
-        printf(COL_RESET);
-    }
-
-    /* Divider */
-    int divrow = list_top + list_h;
-    move_to(divrow, 1);
-    for (int c = 0; c < w; c++) printf("─");
-
-    /* Chart info for selected song */
-    if (g_song_sel < g_song_count) {
-        Song *s = &g_songs[g_song_sel];
-        if (g_chart_sel >= s->chart_count) g_chart_sel = 0;
-
-        move_to(divrow+1, 1);
-        printf(COL_BYELLOW COL_BOLD "  %s", s->title);
-        if (s->subtitle[0]) printf(" %s", s->subtitle);
-        printf(COL_RESET COL_DIM "  by %s" COL_RESET, s->artist);
-
-        /* Charts */
-        move_to(divrow+2, 1);
-        printf(COL_DIM "  Charts:  " COL_RESET);
-        for (int ci = 0; ci < s->chart_count; ci++) {
-            Chart *ch = &s->charts[ci];
-            if (ci == g_chart_sel) printf(COL_BOLD "\033[48;5;236m");
-            else printf(COL_RESET);
-
-            const char *diff_col = COL_WHITE;
-            if      (!strcasecmp(ch->difficulty, "Beginner"))  diff_col = COL_BGREEN;
-            else if (!strcasecmp(ch->difficulty, "Easy"))       diff_col = COL_BYELLOW;
-            else if (!strcasecmp(ch->difficulty, "Medium"))     diff_col = COL_BCYAN;
-            else if (!strcasecmp(ch->difficulty, "Hard"))       diff_col = COL_BRED;
-            else if (!strcasecmp(ch->difficulty, "Challenge"))  diff_col = COL_BMAGENTA;
-
-            printf(" %s%s %d" COL_RESET, diff_col, ch->difficulty, ch->meter);
-            if (ci < s->chart_count-1) printf(COL_DIM " ·" COL_RESET);
-        }
-
-        if (s->chart_count > 0) {
-            Chart *ch = &s->charts[g_chart_sel];
-            move_to(divrow+3, 1);
-            printf(COL_DIM "  Mode: %s  ·  Notes: %d  ·  BPM: %.0f",
-                ch->stepstype, ch->note_count,
-                s->bpm_count ? s->bpms[0].bpm : 0.0);
-            printf(COL_RESET);
-        }
-    }
-
-    /* Footer */
-    move_to(h, 1);
-    for (int c = 0; c < w; c++) printf("─");
-    move_to(h, 1);
-    printf(COL_DIM " ↑↓ Songs  ·  ←→ Charts  ·  Enter Play  ·  Q Back" COL_RESET);
+static void sim_free(Simfile *sf) {
+  free(sf->bpms);
+  for (int i = 0; i < sf->ncharts; i++) {
+    for (int col = 0; col < 4; col++) free(sf->charts[i].colIdx[col]);
+    free(sf->charts[i].notes);
+  }
+  free(sf->charts);
+  memset(sf, 0, sizeof(*sf));
 }
 
-/* ── PLAY SCREEN ── */
+// ---------- Gameplay ----------
+typedef struct {
+  int marv, perf, great, good, miss;
+  int combo, maxCombo;
+  int score;
+  char lastJudge[32];
+  double scroll; // rows/sec
+} Stats;
 
-/* Lane width: each col = 3 chars (arrow + spaces) */
-#define LANE_W 3
-
-static void render_play(void) {
-    int w = g_term_w, h = g_term_h;
-    int ncols  = g_chart->numcols;
-    int play_w = ncols * LANE_W + 2; /* border */
-    int play_x = (w - play_w) / 2 + 1;
-    int play_h = h - 6;
-    int top    = 2;
-    int bottom = top + play_h - 1;
-    int judge_row = bottom + 1;
-    int receptor_row = bottom - 1;
-
-    /* Clear */
-    for (int r = 1; r <= h; r++) { move_to(r, 1); clear_line(); }
-
-    /* ── Left info panel ── */
-    int info_x = play_x - 22;
-    if (info_x < 1) info_x = 1;
-
-    move_to(top, info_x);
-    printf(COL_BMAGENTA COL_BOLD "♪ %s" COL_RESET, g_song->title);
-
-    move_to(top+1, info_x);
-    printf(COL_DIM "%s" COL_RESET, g_song->artist);
-
-    move_to(top+3, info_x);
-    printf(COL_BYELLOW COL_BOLD "Score:" COL_RESET);
-    move_to(top+4, info_x);
-    printf(COL_BWHITE COL_BOLD "%06.2f%%" COL_RESET, g_score.score);
-
-    move_to(top+6, info_x);
-    printf(COL_BYELLOW "Combo:" COL_RESET);
-    move_to(top+7, info_x);
-    if (g_score.combo > 0)
-        printf(COL_BGREEN COL_BOLD "%d" COL_RESET, g_score.combo);
-    else
-        printf(COL_DIM "–" COL_RESET);
-
-    move_to(top+9,  info_x); printf(COL_DIM "Marv:  " COL_BWHITE  "%d" COL_RESET, g_score.marv);
-    move_to(top+10, info_x); printf(COL_DIM "Perf:  " COL_BYELLOW "%d" COL_RESET, g_score.perf);
-    move_to(top+11, info_x); printf(COL_DIM "Great: " COL_BGREEN  "%d" COL_RESET, g_score.great);
-    move_to(top+12, info_x); printf(COL_DIM "Good:  " COL_BCYAN   "%d" COL_RESET, g_score.good);
-    move_to(top+13, info_x); printf(COL_DIM "Bad:   " COL_BRED    "%d" COL_RESET, g_score.bad);
-    move_to(top+14, info_x); printf(COL_DIM "Miss:  " COL_RED     "%d" COL_RESET, g_score.miss);
-
-    double cur_bpm = bpm_at_time(g_song, g_song_time);
-    move_to(top+16, info_x);
-    printf(COL_DIM "BPM: " COL_BCYAN "%.0f" COL_RESET, cur_bpm);
-
-    /* Speed indicator */
-    move_to(top+17, info_x);
-    printf(COL_DIM "Speed: " COL_BYELLOW "%.1fx" COL_RESET, g_scroll);
-
-    /* Judgement flash */
-    double now = now_sec();
-    if (g_last_judge != JDG_NONE && now - g_judge_flash_time < 0.6) {
-        move_to(judge_row, play_x);
-        double alpha = 1.0 - (now - g_judge_flash_time) / 0.6;
-        if (alpha > 0.5) printf(COL_BOLD);
-        printf("%s%s" COL_RESET, judge_str(g_last_judge), COL_RESET);
-    } else {
-        move_to(judge_row, play_x);
-        printf("           ");
-    }
-
-    /* ── Lane borders ── */
-    printf(COL_DIM);
-    /* Left border */
-    for (int r = top; r <= bottom; r++) {
-        move_to(r, play_x);
-        printf("│");
-    }
-    /* Right border */
-    for (int r = top; r <= bottom; r++) {
-        move_to(r, play_x + play_w - 1);
-        printf("│");
-    }
-    /* Lane dividers */
-    for (int c = 1; c < ncols; c++) {
-        for (int r = top; r <= bottom; r++) {
-            move_to(r, play_x + 1 + c * LANE_W);
-            printf("·");
-        }
-    }
-    printf(COL_RESET);
-
-    /* ── Receptor row ── */
-    for (int c = 0; c < ncols; c++) {
-        int cx = play_x + 1 + c * LANE_W;
-        move_to(receptor_row, cx);
-        double flash_age = now - g_col_flash[c];
-        if (flash_age < 0.1) {
-            /* Hit flash */
-            printf("%s" COL_BOLD "═══" COL_RESET, judge_color(g_col_flash_judge[c]));
-        } else if (g_hold_held[c]) {
-            printf(COL_BGREEN COL_BOLD "───" COL_RESET);
-        } else {
-            printf(COL_DIM "%s───%s", col_lane_color(ncols, c), COL_RESET);
-        }
-    }
-
-    /* Top/bottom bar of play field */
-    move_to(top, play_x);
-    printf(COL_DIM "├");
-    for (int c = 0; c < ncols; c++) {
-        printf("───");
-        if (c < ncols-1) printf("┼");
-    }
-    printf("┤" COL_RESET);
-
-    move_to(bottom, play_x);
-    printf(COL_DIM "├");
-    for (int c = 0; c < ncols; c++) {
-        printf("───");
-        if (c < ncols-1) printf("┼");
-    }
-    printf("┤" COL_RESET);
-
-    /* ── Draw notes ── */
-    double cur_beat = sec_to_beat(g_song, g_song_time);
-
-    for (int i = 0; i < g_anote_count; i++) {
-        ActiveNote *an = &g_anotes[i];
-        if (an->judged && an->type != NT_HOLD_S && an->type != NT_ROLL_S) continue;
-        if (an->judged == JDG_MISS) continue;
-
-        char t = an->type;
-        if (t == NT_HOLD_E) continue; /* rendered as part of hold */
-
-        double note_beat = an->beat;
-        /* Distance from receptor in beats */
-        double delta_beat = note_beat - cur_beat;
-        double px = delta_beat * g_scroll; /* positive = above receptor */
-
-        int note_row = receptor_row - (int)round(px);
-
-        /* Hold body */
-        if ((t == NT_HOLD_S || t == NT_ROLL_S) && !an->judged) {
-            double end_beat = an->hold_end_beat;
-            double end_px   = (end_beat - cur_beat) * g_scroll;
-            int end_row     = receptor_row - (int)round(end_px);
-            int body_top    = (note_row < end_row) ? note_row : end_row;
-            int body_bot    = (note_row > end_row) ? note_row : end_row;
-            for (int r = body_top+1; r < body_bot; r++) {
-                if (r <= top || r >= bottom) continue;
-                int cx = play_x + 1 + an->col * LANE_W;
-                move_to(r, cx);
-                if (t == NT_ROLL_S) printf(COL_BYELLOW "═══" COL_RESET);
-                else                printf(COL_BCYAN   "───" COL_RESET);
-            }
-        }
-
-        if (note_row <= top || note_row >= receptor_row) continue;
-
-        int cx = play_x + 1 + an->col * LANE_W;
-        move_to(note_row, cx);
-
-        const char *clr = note_color(note_beat);
-        const char *arrow = col_char(ncols, an->col);
-
-        if (t == NT_MINE) {
-            printf(COL_BRED COL_BOLD " ✕ " COL_RESET);
-        } else if (t == NT_HOLD_S || t == NT_ROLL_S) {
-            printf("%s%s[%s]%s" COL_RESET, clr, COL_BOLD, arrow, COL_RESET);
-        } else {
-            printf("%s%s %s %s" COL_RESET, clr, COL_BOLD, arrow, COL_RESET);
-        }
-    }
-
-    /* ── Paused overlay ── */
-    if (g_paused) {
-        int pr = h / 2;
-        move_to(pr, play_x);
-        printf(COL_BYELLOW COL_BOLD "  ❚❚ PAUSED  " COL_RESET);
-    }
-
-    /* ── Footer ── */
-    move_to(h, 1);
-    printf(COL_DIM " D/F/J/K = lanes  ·  Space = pause  ·  +/- = speed  ·  Q = quit" COL_RESET);
-
-    /* Progress bar */
-    int total_beats = 0;
-    if (g_anote_count > 0)
-        total_beats = (int)(g_anotes[g_anote_count-1].beat + 4);
-    int progress_w = w - 2;
-    int filled = (cur_beat > 0 && total_beats > 0)
-                 ? (int)(cur_beat / total_beats * progress_w) : 0;
-    if (filled > progress_w) filled = progress_w;
-    move_to(h-1, 1);
-    printf(COL_DIM "▕");
-    printf(COL_BMAGENTA);
-    for (int i = 0; i < filled; i++) printf("█");
-    printf(COL_DIM);
-    for (int i = filled; i < progress_w; i++) printf("░");
-    printf("▏" COL_RESET);
+static const char* judge_name(int j) {
+  switch (j) {
+    case 0: return "MARV";
+    case 1: return "PERF";
+    case 2: return "GREAT";
+    case 3: return "GOOD";
+    case 4: return "MISS";
+    default: return "";
+  }
 }
 
-/* ── RESULT SCREEN ── */
-static const char *grade_str(double score) {
-    if (score >= 100.0) return COL_BWHITE  COL_BOLD "✦✦✦ PERFECT ✦✦✦";
-    if (score >= 99.0)  return COL_BWHITE  COL_BOLD "  ★★★  SSS  ★★★";
-    if (score >= 98.0)  return COL_BYELLOW COL_BOLD "   ★★   SS  ★★  ";
-    if (score >= 96.0)  return COL_BYELLOW COL_BOLD "    ★    S   ★   ";
-    if (score >= 94.0)  return COL_BGREEN  COL_BOLD "       AAA      ";
-    if (score >= 92.0)  return COL_BGREEN  COL_BOLD "        AA      ";
-    if (score >= 89.0)  return COL_BCYAN   COL_BOLD "         A      ";
-    if (score >= 86.0)  return COL_BCYAN   COL_BOLD "         B      ";
-    if (score >= 83.0)  return COL_BBLUE   COL_BOLD "         C      ";
-    if (score >= 80.0)  return COL_BBLUE   COL_BOLD "         D      ";
-    return                     COL_BRED    COL_BOLD  "         E      ";
+static unsigned char judge_color(int j) {
+  switch (j) {
+    case 0: return C_CYAN;
+    case 1: return C_GREEN;
+    case 2: return C_YELLOW;
+    case 3: return C_MAG;
+    case 4: return C_RED;
+    default: return C_TEXT;
+  }
 }
 
-static void render_result(void) {
-    int w = g_term_w, h = g_term_h;
-    for (int r = 1; r <= h; r++) { move_to(r, 1); clear_line(); }
-
-    printf(COL_BMAGENTA COL_BOLD);
-    print_centered(2, "╔══════════════════════════════╗", w);
-    print_centered(3, "║      R E S U L T S           ║", w);
-    print_centered(4, "╚══════════════════════════════╝", w);
-    printf(COL_RESET);
-
-    /* Song name */
-    char tmp[256];
-    snprintf(tmp, sizeof(tmp), "%s – %s", g_song->title, g_song->artist);
-    printf(COL_BYELLOW);
-    print_centered(6, tmp, w);
-    printf(COL_RESET);
-
-    /* Difficulty */
-    snprintf(tmp, sizeof(tmp), "%s %d", g_chart->difficulty, g_chart->meter);
-    printf(COL_DIM);
-    print_centered(7, tmp, w);
-    printf(COL_RESET);
-
-    /* Grade */
-    int gr = (w - 16) / 2 + 1;
-    move_to(9, gr);
-    printf("%s" COL_RESET, grade_str(g_score.score));
-
-    /* Score */
-    snprintf(tmp, sizeof(tmp), "%06.2f%%", g_score.score);
-    printf(COL_BWHITE COL_BOLD);
-    print_centered(11, tmp, w);
-    printf(COL_RESET);
-
-    /* Stats table */
-    int tc = w/2 - 10;
-    move_to(13, tc); printf(COL_BWHITE  "✦ Marvelous  " COL_BWHITE  "%5d" COL_RESET, g_score.marv);
-    move_to(14, tc); printf(COL_BYELLOW "★ Perfect    " COL_BYELLOW "%5d" COL_RESET, g_score.perf);
-    move_to(15, tc); printf(COL_BGREEN  "◆ Great      " COL_BGREEN  "%5d" COL_RESET, g_score.great);
-    move_to(16, tc); printf(COL_BCYAN   "● Good       " COL_BCYAN   "%5d" COL_RESET, g_score.good);
-    move_to(17, tc); printf(COL_BRED    "▼ Bad        " COL_BRED    "%5d" COL_RESET, g_score.bad);
-    move_to(18, tc); printf(COL_RED     "✕ Miss       " COL_RED     "%5d" COL_RESET, g_score.miss);
-
-    move_to(20, tc);
-    printf(COL_DIM "Max Combo:  " COL_BYELLOW "%5d" COL_RESET, g_score.max_combo);
-
-    /* Footer */
-    move_to(h-1, 1);
-    printf(COL_DIM " Enter = select songs  ·  Q = quit" COL_RESET);
+static int judge_for_delta(double dtAbs) {
+  // seconds
+  if (dtAbs <= 0.022) return 0; // MARV-ish
+  if (dtAbs <= 0.045) return 1; // PERF
+  if (dtAbs <= 0.080) return 2; // GREAT
+  if (dtAbs <= 0.120) return 3; // GOOD
+  return 4;                     // MISS
 }
 
-/* ─────────────────────────────────────────────
-   INPUT HANDLING
-───────────────────────────────────────────── */
-
-/* Key mapping for 4-col: D F J K */
-/* For 6-col: S D F J K L */
-/* For 8-col: A S D F J K L ; */
-static int key_to_col(int key, int ncols) {
-    if (ncols == 4) {
-        if (key == 'd') return 0;
-        if (key == 'f') return 1;
-        if (key == 'j') return 2;
-        if (key == 'k') return 3;
-    } else if (ncols == 6) {
-        if (key == 's') return 0;
-        if (key == 'd') return 1;
-        if (key == 'f') return 2;
-        if (key == 'j') return 3;
-        if (key == 'k') return 4;
-        if (key == 'l') return 5;
-    } else if (ncols == 8) {
-        if (key == 'a') return 0;
-        if (key == 's') return 1;
-        if (key == 'd') return 2;
-        if (key == 'f') return 3;
-        if (key == 'j') return 4;
-        if (key == 'k') return 5;
-        if (key == 'l') return 6;
-        if (key == ';') return 7;
-    }
-    return -1;
+static void apply_judge(Stats *st, int j) {
+  snprintf(st->lastJudge, sizeof(st->lastJudge), "%s", judge_name(j));
+  if (j == 0) { st->marv++; st->combo++; st->score += 5; }
+  else if (j == 1) { st->perf++; st->combo++; st->score += 4; }
+  else if (j == 2) { st->great++; st->combo++; st->score += 2; }
+  else if (j == 3) { st->good++; st->combo++; st->score += 1; }
+  else { st->miss++; st->combo = 0; }
+  st->maxCombo = MAX(st->maxCombo, st->combo);
 }
 
-static void handle_input(void) {
-    char buf[8];
-    int n = (int)read(STDIN_FILENO, buf, sizeof(buf));
-    if (n <= 0) return;
+static int read_key_nonblock(void) {
+  fd_set rfds;
+  FD_ZERO(&rfds);
+  FD_SET(STDIN_FILENO, &rfds);
+  struct timeval tv = {0, 0};
+  int r = select(STDIN_FILENO + 1, &rfds, NULL, NULL, &tv);
+  if (r <= 0) return -1;
 
-    for (int i = 0; i < n; i++) {
-        int c = (unsigned char)buf[i];
-
-        /* Escape sequences */
-        if (c == 0x1b && i+1 < n && buf[i+1] == '[') {
-            int ch = (unsigned char)buf[i+2];
-            i += 2;
-            if (g_state == STATE_SELECT) {
-                if (ch == 'A') { /* up */
-                    if (g_song_sel > 0) g_song_sel--;
-                } else if (ch == 'B') { /* down */
-                    if (g_song_sel < g_song_count-1) g_song_sel++;
-                } else if (ch == 'C') { /* right */
-                    if (g_song_sel < g_song_count) {
-                        Song *s = &g_songs[g_song_sel];
-                        if (g_chart_sel < s->chart_count-1) g_chart_sel++;
-                    }
-                } else if (ch == 'D') { /* left */
-                    if (g_chart_sel > 0) g_chart_sel--;
-                }
-            }
-            continue;
-        }
-
-        if (g_state == STATE_MENU) {
-            if (c == '\r' || c == '\n') {
-                if (g_song_count > 0) {
-                    g_state = STATE_SELECT;
-                    g_song_sel = 0;
-                    g_chart_sel = 0;
-                    g_scroll_off = 0;
-                }
-            } else if (c == 'q' || c == 'Q') {
-                g_running = 0;
-            }
-        } else if (g_state == STATE_SELECT) {
-            if (c == '\r' || c == '\n') {
-                if (g_song_count > 0) {
-                    Song *s = &g_songs[g_song_sel];
-                    if (g_chart_sel < s->chart_count) {
-                        init_play(s, &s->charts[g_chart_sel]);
-                        g_state = STATE_PLAY;
-                        gettimeofday(&g_last_frame, NULL);
-                    }
-                }
-            } else if (c == 'q' || c == 'Q') {
-                g_state = STATE_MENU;
-            }
-        } else if (g_state == STATE_PLAY) {
-            if (c == ' ') {
-                g_paused = !g_paused;
-                if (!g_paused) gettimeofday(&g_last_frame, NULL);
-            } else if (c == 'q' || c == 'Q') {
-                g_state = STATE_RESULT;
-            } else if (c == '+' || c == '=') {
-                g_scroll += 0.5;
-                if (g_scroll > 10.0) g_scroll = 10.0;
-            } else if (c == '-') {
-                g_scroll -= 0.5;
-                if (g_scroll < 0.5) g_scroll = 0.5;
-            } else {
-                int col = key_to_col(c, g_chart->numcols);
-                if (col >= 0) col_press(col);
-            }
-        } else if (g_state == STATE_RESULT) {
-            if (c == '\r' || c == '\n') {
-                g_state = STATE_SELECT;
-            } else if (c == 'q' || c == 'Q') {
-                g_running = 0;
-            }
-        }
-    }
+  unsigned char c = 0;
+  if (read(STDIN_FILENO, &c, 1) != 1) return -1;
+  return (int)c;
 }
 
-/* Handle key release (approximate: re-press detection) */
-/* We track held keys with a simple mechanism */
-static int g_keys_down[256];
+static int map_key_to_col(int k, int *needsMore) {
+  *needsMore = 0;
+  if (k == 'd' || k == 'D') return 0;
+  if (k == 'f' || k == 'F') return 1;
+  if (k == 'j' || k == 'J') return 2;
+  if (k == 'k' || k == 'K') return 3;
 
-static void update_key_releases(void) {
-    /* In terminal raw mode we can't truly detect key-up.
-       We simulate it by treating hold as active only while key is being
-       pressed repeatedly within a short window. This is a known limitation
-       of terminal input. We auto-release after 150ms. */
-    double now = now_sec();
-    static double g_key_time[256];
-    char buf[8];
-    int n = (int)read(STDIN_FILENO, buf, sizeof(buf));
-    if (n <= 0) {
-        /* Check for auto-release */
-        if (g_chart) {
-            for (int c = 0; c < g_chart->numcols; c++) {
-                /* can't really detect release in terminal — skip for holds */
-            }
-        }
-        return;
-    }
-    (void)now;
-    (void)g_key_time;
-    /* re-feed to handle_input */
-    for (int i = 0; i < n; i++) {
-        char tmp[2] = { buf[i], 0 };
-        /* Push back is messy; just ignore double reads for now */
-        (void)tmp;
-    }
+  // arrow keys: ESC [ A/B/C/D
+  if (k == 27) { *needsMore = 1; return -1; }
+  return -1;
 }
 
-/* ─────────────────────────────────────────────
-   MAIN LOOP
-───────────────────────────────────────────── */
-static void update_play(void) {
-    if (g_paused) return;
-
-    struct timeval now_tv;
-    gettimeofday(&now_tv, NULL);
-    double elapsed = (now_tv.tv_sec  - g_last_frame.tv_sec) +
-                     (now_tv.tv_usec - g_last_frame.tv_usec) * 1e-6;
-    g_last_frame = now_tv;
-
-    g_song_time += elapsed;
-    update_notes();
-
-    /* Check if song is done */
-    if (g_anote_count > 0) {
-        double last_note_time = g_anotes[g_anote_count-1].time;
-        if (g_song_time > last_note_time + 3.0) {
-            g_state = STATE_RESULT;
-        }
-    }
+static int map_arrow_seq_to_col(void) {
+  int k1 = read_key_nonblock();
+  if (k1 < 0) return -1;
+  if (k1 != '[') return -1;
+  int k2 = read_key_nonblock();
+  if (k2 < 0) return -1;
+  // Left=D col0, Down=B col1, Up=A col2, Right=C col3
+  if (k2 == 'D') return 0;
+  if (k2 == 'B') return 1;
+  if (k2 == 'A') return 2;
+  if (k2 == 'C') return 3;
+  return -1;
 }
 
-int main(int argc, char *argv[]) {
-    /* Setup */
-    signal(SIGINT,  handle_signal);
-    signal(SIGTERM, handle_signal);
-    signal(SIGWINCH, handle_resize);
-    term_raw();
-    cursor_hide();
-    term_size();
-    clear_screen();
-    printf("\033[?47h"); /* alternate screen */
+static void try_hit(Chart *c, Stats *st, int col, double tnow) {
+  if (col < 0 || col > 3) return;
+  int ptr = c->ptrCol[col];
+  if (ptr >= c->nCol[col]) return;
 
-    /* Load songs */
-    if (argc < 2) {
-        /* Try current directory */
-        scan_dir(".");
-    } else {
-        for (int i = 1; i < argc; i++) {
-            /* Is it a file? */
-            if (ends_with(argv[i], ".sm") || ends_with(argv[i], ".ssc")) {
-                Song *s = &g_songs[g_song_count];
-                memset(s, 0, sizeof(*s));
-                int ok = 0;
-                if (ends_with(argv[i], ".ssc")) ok = parse_ssc(s, argv[i]);
-                else                              ok = parse_sm(s,  argv[i]);
-                if (ok) {
-                    if (!s->title[0]) strncpy(s->title, argv[i], MAX_TITLE-1);
-                    g_song_count++;
-                }
-            } else {
-                scan_dir(argv[i]);
-            }
-        }
+  int ni = c->colIdx[col][ptr];
+  Note *n = &c->notes[ni];
+  if (n->hit != 0) { c->ptrCol[col]++; return; }
+
+  double dt = tnow - n->time;
+  double adt = fabs(dt);
+
+  // too early: ignore input (no ghost taps)
+  if (dt < -0.150) return;
+
+  int j = judge_for_delta(adt);
+  if (j == 4) {
+    // too late to be a hit; treat as miss
+    n->hit = -1;
+    c->ptrCol[col]++;
+    apply_judge(st, 4);
+    return;
+  }
+
+  n->hit = 1;
+  c->ptrCol[col]++;
+  apply_judge(st, j);
+}
+
+static void apply_auto_miss(Chart *c, Stats *st, double tnow) {
+  const double missAfter = 0.180;
+  for (int col = 0; col < 4; col++) {
+    while (c->ptrCol[col] < c->nCol[col]) {
+      int ni = c->colIdx[col][c->ptrCol[col]];
+      Note *n = &c->notes[ni];
+      if (n->hit != 0) { c->ptrCol[col]++; continue; }
+      if (tnow > n->time + missAfter) {
+        n->hit = -1;
+        c->ptrCol[col]++;
+        apply_judge(st, 4);
+        continue;
+      }
+      break;
+    }
+  }
+}
+
+static unsigned char col_color(int col) {
+  switch (col) {
+    case 0: return C_BLUE;
+    case 1: return C_GREEN;
+    case 2: return C_YELLOW;
+    case 3: return C_MAG;
+    default: return C_TEXT;
+  }
+}
+
+static void draw_box(Screen *s, int x0, int y0, int x1, int y1) {
+  for (int x = x0; x <= x1; x++) {
+    set_cell(s, x, y0, '-', C_BORDER);
+    set_cell(s, x, y1, '-', C_BORDER);
+  }
+  for (int y = y0; y <= y1; y++) {
+    set_cell(s, x0, y, '|', C_BORDER);
+    set_cell(s, x1, y, '|', C_BORDER);
+  }
+  set_cell(s, x0, y0, '+', C_BORDER);
+  set_cell(s, x1, y0, '+', C_BORDER);
+  set_cell(s, x0, y1, '+', C_BORDER);
+  set_cell(s, x1, y1, '+', C_BORDER);
+}
+
+static void gameplay_loop(const Simfile *sf, Chart *c) {
+  int tw, th;
+  get_termsize(&tw, &th);
+  if (tw < 60 || th < 22) die("Terminal too small. Resize to at least 60x22.");
+
+  Screen scr;
+  screen_init(&scr, tw, th);
+
+  Stats st;
+  memset(&st, 0, sizeof(st));
+  snprintf(st.lastJudge, sizeof(st.lastJudge), "READY");
+  st.scroll = 18.0; // rows/sec
+
+  // Layout
+  int headerH = 3;
+  int footerH = 3;
+  int playY0 = headerH;
+  int playY1 = th - footerH - 1;
+
+  int boxW = 26;
+  int boxX0 = (tw - boxW) / 2;
+  int boxX1 = boxX0 + boxW - 1;
+
+  int boxY0 = playY0;
+  int boxY1 = playY1;
+
+  int receptorY = boxY1 - 2;
+
+  int laneX[4];
+  int innerW = boxW - 2;
+  int center = boxX0 + 1 + innerW / 2;
+  int spacing = 4;
+  laneX[0] = center - spacing - 2;
+  laneX[1] = center - 1;
+  laneX[2] = center + 2;
+  laneX[3] = center + spacing + 1;
+
+  // Determine song end time (last note + a bit)
+  double lastT = 0.0;
+  for (int i = 0; i < c->nnotes; i++) lastT = MAX(lastT, c->notes[i].time);
+  double endT = lastT + 2.0;
+
+  term_raw();
+
+  // Short countdown
+  double t0 = now_sec();
+  while (!g_shouldQuit) {
+    double t = now_sec() - t0;
+    if (t > 2.2) break;
+
+    screen_clear(&scr);
+    draw_box(&scr, boxX0, boxY0, boxX1, boxY1);
+
+    char line1[256];
+    snprintf(line1, sizeof(line1), "%s", sf->title);
+    draw_text(&scr, 2, 0, C_TEXT, line1);
+
+    char line2[256];
+    snprintf(line2, sizeof(line2), "dance-single  %s  %d", c->difficulty[0]?c->difficulty:"(unknown)", c->meter);
+    draw_text(&scr, 2, 1, C_DIM, line2);
+
+    const char *msg = (t < 0.8) ? "3" : (t < 1.5) ? "2" : "1";
+    draw_text(&scr, center, (boxY0 + boxY1) / 2, C_BRIGHT, msg);
+    draw_text(&scr, center - 7, (boxY0 + boxY1) / 2 + 2, C_DIM, "Get ready");
+
+    screen_render(&scr);
+
+    struct timespec ts = {0, 16 * 1000 * 1000};
+    nanosleep(&ts, NULL);
+  }
+
+  double start = now_sec();
+
+  // Main loop
+  int drawStartIdx = 0;
+  while (!g_shouldQuit) {
+    double tnow = now_sec() - start;
+
+    // Input
+    for (;;) {
+      int k = read_key_nonblock();
+      if (k < 0) break;
+      if (k == 'q' || k == 'Q') { g_shouldQuit = 1; break; }
+      if (k == '+') st.scroll = MIN(40.0, st.scroll + 1.0);
+      if (k == '-') st.scroll = MAX(6.0,  st.scroll - 1.0);
+
+      int needsMore = 0;
+      int col = map_key_to_col(k, &needsMore);
+      if (needsMore) col = map_arrow_seq_to_col();
+      if (col >= 0) try_hit(c, &st, col, tnow);
     }
 
-    /* State */
-    g_state = STATE_MENU;
-    if (g_song_count == 1) {
-        /* Auto-select if only one song */
-        g_state = STATE_SELECT;
+    apply_auto_miss(c, &st, tnow);
+
+    // End condition
+    if (tnow > endT) break;
+
+    // Draw
+    screen_clear(&scr);
+
+    // Header
+    char h0[512];
+    snprintf(h0, sizeof(h0), "%s", sf->title);
+    draw_text(&scr, 2, 0, C_TEXT, h0);
+
+    char h1[512];
+    snprintf(h1, sizeof(h1), "Chart: %s %d   Offset: %.3fs   Scroll: %.0f",
+             c->difficulty[0]?c->difficulty:"(unknown)", c->meter, sf->offset, st.scroll);
+    draw_text(&scr, 2, 1, C_DIM, h1);
+
+    char h2[512];
+    snprintf(h2, sizeof(h2), "Time: %6.2fs   Score: %6d   Combo: %4d  (Max %d)",
+             tnow, st.score, st.combo, st.maxCombo);
+    draw_text(&scr, 2, 2, C_DIM, h2);
+
+    // Box
+    draw_box(&scr, boxX0, boxY0, boxX1, boxY1);
+
+    // Lanes vertical guides
+    for (int y = boxY0 + 1; y <= boxY1 - 1; y++) {
+      for (int col = 0; col < 4; col++) {
+        set_cell(&scr, laneX[col], y, '.', C_DIM);
+      }
     }
 
-    gettimeofday(&g_last_frame, NULL);
-
-    while (g_running) {
-        term_size();
-        handle_input();
-
-        if (g_state == STATE_PLAY) {
-            update_play();
-            render_play();
-        } else if (g_state == STATE_MENU) {
-            render_menu();
-        } else if (g_state == STATE_SELECT) {
-            render_select();
-        } else if (g_state == STATE_RESULT) {
-            render_result();
-        }
-
-        fflush(stdout);
-
-        /* Frame timing */
-        struct timeval now_tv;
-        gettimeofday(&now_tv, NULL);
-        static struct timeval frame_start;
-        static int first = 1;
-        if (first) { frame_start = now_tv; first = 0; }
-        long elapsed_us = (now_tv.tv_sec  - frame_start.tv_sec)  * 1000000L
-                        + (now_tv.tv_usec - frame_start.tv_usec);
-        long sleep_us = FRAME_US - elapsed_us;
-        if (sleep_us > 0) usleep((useconds_t)sleep_us);
-        gettimeofday(&frame_start, NULL);
+    // Receptors
+    for (int col = 0; col < 4; col++) {
+      set_cell(&scr, laneX[col], receptorY, '=', col_color(col));
+      const char *key = (col==0)?"D":(col==1)?"F":(col==2)?"J":"K";
+      draw_text(&scr, laneX[col]-0, receptorY+1, C_DIM, key);
     }
 
-    /* Cleanup */
-    printf("\033[?47l"); /* restore screen */
-    cursor_show();
-    clear_screen();
-    term_restore();
-    move_to(1, 1);
-    printf(COL_RESET);
-    printf("Thanks for playing! ♪\n");
-    return 0;
+    // Notes in window
+    double lookahead = (double)(receptorY - (boxY0 + 1)) / st.scroll;
+    double behind = 0.35;
+
+    // Advance drawStartIdx for efficiency
+    while (drawStartIdx < c->nnotes && c->notes[drawStartIdx].time < tnow - behind - 1.0) {
+      drawStartIdx++;
+    }
+
+    for (int i = drawStartIdx; i < c->nnotes; i++) {
+      Note *n = &c->notes[i];
+      if (n->hit != 0) continue;
+
+      double dt = n->time - tnow; // positive if upcoming
+      if (dt < -behind) continue;
+      if (dt > lookahead) break; // approximate: times are mostly ordered
+
+      int y = receptorY - (int)lrint(dt * st.scroll);
+      if (y <= boxY0 || y >= boxY1) continue;
+
+      int x = laneX[n->col];
+      set_cell(&scr, x, y, 'O', col_color(n->col));
+    }
+
+    // Footer stats + last judge
+    char f0[512];
+    snprintf(f0, sizeof(f0), "Last: %-5s   MARV %d  PERF %d  GREAT %d  GOOD %d  MISS %d",
+             st.lastJudge, st.marv, st.perf, st.great, st.good, st.miss);
+    draw_text(&scr, 2, th - 2, C_TEXT, f0);
+
+    draw_text(&scr, 2, th - 1, C_DIM, "Controls: D F J K (or arrows)   +/- scroll speed   Q quit");
+
+    // Colorize "Last:" value by re-drawing just that segment
+    // Find position after "Last: "
+    int lastX = 2 + 6;
+    unsigned char jc = C_TEXT;
+    if (strcmp(st.lastJudge, "MARV") == 0) jc = judge_color(0);
+    else if (strcmp(st.lastJudge, "PERF") == 0) jc = judge_color(1);
+    else if (strcmp(st.lastJudge, "GREAT") == 0) jc = judge_color(2);
+    else if (strcmp(st.lastJudge, "GOOD") == 0) jc = judge_color(3);
+    else if (strcmp(st.lastJudge, "MISS") == 0) jc = judge_color(4);
+    draw_text(&scr, lastX, th - 2, jc, st.lastJudge);
+
+    screen_render(&scr);
+
+    // Frame pacing ~60fps
+    struct timespec ts = {0, 16 * 1000 * 1000};
+    nanosleep(&ts, NULL);
+  }
+
+  // Summary
+  screen_clear(&scr);
+  draw_text(&scr, 2, 1, C_TEXT, "Results");
+  draw_text(&scr, 2, 2, C_DIM,  "-------");
+  char r0[256];
+  snprintf(r0, sizeof(r0), "Song: %s", sf->title);
+  draw_text(&scr, 2, 4, C_TEXT, r0);
+
+  char r1[256];
+  snprintf(r1, sizeof(r1), "Chart: %s %d", c->difficulty[0]?c->difficulty:"(unknown)", c->meter);
+  draw_text(&scr, 2, 5, C_TEXT, r1);
+
+  char r2[256];
+  snprintf(r2, sizeof(r2), "Score: %d   Max Combo: %d", st.score, st.maxCombo);
+  draw_text(&scr, 2, 7, C_TEXT, r2);
+
+  char r3[256];
+  snprintf(r3, sizeof(r3), "MARV %d  PERF %d  GREAT %d  GOOD %d  MISS %d", st.marv, st.perf, st.great, st.good, st.miss);
+  draw_text(&scr, 2, 8, C_TEXT, r3);
+
+  draw_text(&scr, 2, 10, C_DIM, "Press any key to exit...");
+  screen_render(&scr);
+
+  // Wait for any key
+  while (read_key_nonblock() < 0) {
+    struct timespec ts = {0, 30 * 1000 * 1000};
+    nanosleep(&ts, NULL);
+  }
+
+  screen_free(&scr);
+}
+
+// ---------- Main / selection ----------
+static int choose_chart_interactive(const Simfile *sf) {
+  if (sf->ncharts <= 0) return -1;
+  if (sf->ncharts == 1) return 0;
+
+  // Use normal terminal mode for selection (simple, readable)
+  fprintf(stderr, "Found %d dance-single chart(s):\n", sf->ncharts);
+  for (int i = 0; i < sf->ncharts; i++) {
+    const Chart *c = &sf->charts[i];
+    fprintf(stderr, "  [%d] %-12s  meter %2d  notes %5d\n",
+            i, c->difficulty[0]?c->difficulty:"(unknown)", c->meter, c->nnotes);
+  }
+  fprintf(stderr, "Choose chart index: ");
+  fflush(stderr);
+
+  int idx = 0;
+  if (scanf("%d", &idx) != 1) return 0;
+  if (idx < 0) idx = 0;
+  if (idx >= sf->ncharts) idx = sf->ncharts - 1;
+  return idx;
+}
+
+int main(int argc, char **argv) {
+  if (argc < 2) {
+    fprintf(stderr, "Usage: %s <simfile.sm|simfile.ssc> [chartIndex]\n", argv[0]);
+    return 2;
+  }
+
+  size_t sz = 0;
+  char *text = read_file_all(argv[1], &sz);
+
+  Simfile sf;
+  sim_init(&sf);
+  parse_simfile_text(&sf, text);
+  free(text);
+
+  if (sf.ncharts <= 0) {
+    sim_free(&sf);
+    die("No supported charts found (needs dance-single).");
+  }
+
+  int idx = -1;
+  if (argc >= 3) {
+    idx = atoi(argv[2]);
+    idx = MIN(MAX(idx, 0), sf.ncharts - 1);
+  } else {
+    idx = choose_chart_interactive(&sf);
+  }
+
+  gameplay_loop(&sf, &sf.charts[idx]);
+
+  sim_free(&sf);
+  return 0;
 }
