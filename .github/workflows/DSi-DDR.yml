@@ -6,33 +6,10 @@ on:
 jobs:
   build-nds:
     runs-on: ubuntu-latest
-    container: name: DSi-DDR
-on:
-  push:
-    branches:
-    - master
-jobs:
-  build-nds:
-    runs-on: ubuntu-latest
     container: skylyrac/blocksds:slim-latest
     steps:
     - name: Checkout
       uses: actions/checkout@v6
-    - name: Compile
-      run: |
-        make -f Makefile
-    - name: Upload
-      uses: actions/upload-artifact@v6
-      with:
-        name: dsi-DDR
-        path: |
-          *.nds
-    steps:
-    - name: Checkout
-      uses: actions/checkout@v6
-    - name: Install BlockDS
-      run: |
-        docker image pull skylyrac/blocksds:slim-latest
     - name: Compile
       run: |
         make -f Makefile
