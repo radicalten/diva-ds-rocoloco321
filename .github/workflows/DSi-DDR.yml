@@ -6,7 +6,7 @@ on:
 jobs:
   build-nds:
     runs-on: ubuntu-latest
-    container: skyly29/blocksds:latest
+    container: ghcr.io/blocksds/toolchain:latest
     steps:
     - name: Checkout
       uses: actions/checkout@v6
