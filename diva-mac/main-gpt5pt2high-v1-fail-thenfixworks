@@ -4,6 +4,9 @@ Model: Gpt 5.2 high; Initial Release 12-11-25
 
 program fails to compile, but can likely be fixed. 
 
+asked gpt-5.2 to fix itself (shared the compiler errors) then implement the changes and it successfully did. now it works
+
+Notes: notes scroll the wrong direction, but timing seems accurate. decent start but not the best. 
 */
 
 
@@ -14,8 +17,8 @@ program fails to compile, but can likely be fixed.
 // Notes / scope:
 // - Terminal-only renderer (ANSI escapes), updates in-place (no scrolling), no external deps.
 // - Parses .sm and .ssc, supports dance-single (4 columns) charts.
-// - No audio playback (terminal-only); timing is based on chart BPM/offset.
-// - Tap notes: '1','2','4' are treated as hittable heads; holds/roll tails are not drawn.
+// - No audio playback; timing is based on chart BPM/offset.
+// - Tap heads: '1','2','4' are hittable heads.
 // - Keys: D F J K (or arrow keys).  Q quits.  +/- adjusts scroll speed.
 
 #include <ctype.h>
@@ -58,7 +61,6 @@ typedef struct {
   Note *notes;
   int nnotes, capnotes;
 
-  // per-column index lists (indices into notes[], sorted by time)
   int *colIdx[4];
   int nCol[4];
   int ptrCol[4];
@@ -82,9 +84,6 @@ typedef struct {
 
 enum {
   C_DEFAULT = 0,
-  C_BORDER  = 6,   // cyan
-  C_TEXT    = 7,   // white
-  C_DIM     = 8,   // bright black-ish via 90
   C_RED     = 1,
   C_GREEN   = 2,
   C_YELLOW  = 3,
@@ -92,8 +91,12 @@ enum {
   C_MAG     = 5,
   C_CYAN    = 6,
   C_WHITE   = 7,
-  C_BRIGHT  = 8
+  C_DIM     = 8,   // ANSI 90m
+  C_BRIGHT  = 9    // ANSI 97m
 };
+
+#define C_BORDER C_CYAN
+#define C_TEXT   C_WHITE
 
 static struct termios g_orig_termios;
 static volatile sig_atomic_t g_shouldQuit = 0;
@@ -107,19 +110,26 @@ static void die(const char *fmt, ...) {
   exit(1);
 }
 
+static char* xstrdup(const char *s) {
+  size_t n = strlen(s);
+  char *p = (char*)malloc(n + 1);
+  if (!p) die("Out of memory");
+  memcpy(p, s, n + 1);
+  return p;
+}
+
 static double now_sec(void) {
   struct timespec ts;
   if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
   }
-  // Fallback (should rarely hit on modern macOS)
   return (double)time(NULL);
 }
 
 static void term_restore(void) {
   tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_orig_termios);
-  // show cursor, reset attrs, leave alt buffer
-  write(STDOUT_FILENO, "\x1b[0m\x1b[?25h\x1b[?1049l", 18);
+  const char *seq = "\x1b[0m\x1b[?25h\x1b[?1049l";
+  write(STDOUT_FILENO, seq, (size_t)strlen(seq));
 }
 
 static void on_signal(int sig) {
@@ -149,8 +159,8 @@ static void term_raw(void) {
   if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) != 0)
     die("tcsetattr failed: %s", strerror(errno));
 
-  // alt buffer, clear, hide cursor
-  write(STDOUT_FILENO, "\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l", 24);
+  const char *seq = "\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l";
+  write(STDOUT_FILENO, seq, (size_t)strlen(seq));
 }
 
 static void get_termsize(int *w, int *h) {
@@ -204,8 +214,6 @@ static const char* ansi_color(unsigned char c) {
     case C_MAG:    return "\x1b[35m";
     case C_CYAN:   return "\x1b[36m";
     case C_WHITE:  return "\x1b[37m";
-    case C_BORDER: return "\x1b[36m";
-    case C_TEXT:   return "\x1b[37m";
     case C_DIM:    return "\x1b[90m";
     case C_BRIGHT: return "\x1b[97m";
     default:       return "\x1b[0m";
@@ -213,7 +221,6 @@ static const char* ansi_color(unsigned char c) {
 }
 
 static void screen_render(Screen *s) {
-  // move cursor home
   write(STDOUT_FILENO, "\x1b[H", 3);
 
   unsigned char cur = 255;
@@ -224,7 +231,7 @@ static void screen_render(Screen *s) {
       unsigned char c = s->col[i];
       if (c != cur) {
         const char *seq = ansi_color(c);
-        write(STDOUT_FILENO, seq, strlen(seq));
+        write(STDOUT_FILENO, seq, (size_t)strlen(seq));
         cur = c;
       }
       char ch = s->ch[i];
@@ -288,12 +295,10 @@ static const char* parse_next_tag(const char *p, char *tagOut, size_t tagCap, ch
   tagOut[0] = 0;
   if (!p) return NULL;
 
-  // find '#'
   while (*p && *p != '#') p++;
   if (!*p) return NULL;
-  p++; // skip '#'
+  p++;
 
-  // read tag until ':'
   size_t ti = 0;
   while (*p && *p != ':' && *p != '\n' && *p != '\r') {
     if (ti + 1 < tagCap) tagOut[ti++] = (char)toupper((unsigned char)*p);
@@ -302,13 +307,12 @@ static const char* parse_next_tag(const char *p, char *tagOut, size_t tagCap, ch
   tagOut[ti] = 0;
   while (*p && *p != ':') p++;
   if (!*p) return NULL;
-  p++; // skip ':'
+  p++;
 
-  // read value until ';' (may span lines)
   const char *vstart = p;
   while (*p && *p != ';') p++;
   if (!*p) return NULL;
-  const char *vend = p; // not incl ';'
+  const char *vend = p;
 
   size_t vn = (size_t)(vend - vstart);
   char *val = (char*)malloc(vn + 1);
@@ -317,7 +321,7 @@ static const char* parse_next_tag(const char *p, char *tagOut, size_t tagCap, ch
   val[vn] = 0;
 
   *valOut = val;
-  return p + 1; // after ';'
+  return p + 1;
 }
 
 // ---------- Simfile building ----------
@@ -337,7 +341,7 @@ static void sim_add_chart(Simfile *sf, Chart *c) {
     sf->charts = (Chart*)realloc(sf->charts, (size_t)sf->capcharts * sizeof(Chart));
     if (!sf->charts) die("Out of memory");
   }
-  sf->charts[sf->ncharts++] = *c; // struct copy (note buffers owned by chart)
+  sf->charts[sf->ncharts++] = *c;
   chart_init(c);
 }
 
@@ -363,8 +367,6 @@ static int cmp_bpms(const void *A, const void *B) {
 }
 
 static void parse_bpms(Simfile *sf, const char *val) {
-  // val: "0.000=120.000,64.000=150.000"
-  // Build temp array
   BPMSeg *tmp = NULL;
   int n = 0, cap = 0;
 
@@ -400,19 +402,16 @@ static void parse_bpms(Simfile *sf, const char *val) {
 
   qsort(tmp, (size_t)n, sizeof(BPMSeg), cmp_bpms);
 
-  // Ensure beat 0 exists (StepMania usually does, but be defensive)
   if (tmp[0].beat > 0.0) {
     tmp = (BPMSeg*)realloc(tmp, (size_t)(n + 1) * sizeof(BPMSeg));
     if (!tmp) die("Out of memory");
     memmove(tmp + 1, tmp, (size_t)n * sizeof(BPMSeg));
     tmp[0].beat = 0.0;
-    // use first bpm
     tmp[0].bpm = tmp[1].bpm;
     tmp[0].time = 0.0;
     n++;
   }
 
-  // Compute time at each segment start (relative, before OFFSET)
   tmp[0].time = 0.0;
   for (int i = 1; i < n; i++) {
     double dbeat = tmp[i].beat - tmp[i-1].beat;
@@ -429,7 +428,6 @@ static double beat_to_time(const Simfile *sf, double beat) {
   if (!sf->bpms || sf->nbpms == 0) return beat * 60.0 / 120.0 - sf->offset;
 
   int seg = 0;
-  // linear scan is fine for typical segment counts; could binary search
   for (int i = 0; i < sf->nbpms; i++) {
     if (sf->bpms[i].beat <= beat) seg = i;
     else break;
@@ -439,17 +437,11 @@ static double beat_to_time(const Simfile *sf, double beat) {
   double st = sf->bpms[seg].time;
   double bpm = sf->bpms[seg].bpm > 0.0 ? sf->bpms[seg].bpm : 120.0;
   double t = st + (beat - sb) * 60.0 / bpm;
-
-  // StepMania convention: time = beatSeconds - OFFSET
   return t - sf->offset;
 }
 
 static void parse_note_data_into_chart(Chart *c, const char *noteData) {
-  // Measures separated by ','; each measure has N lines (rows), each row is "0000" etc.
-  // We'll treat '1','2','4' as note heads.
   int measureIndex = 0;
-
-  // Collect rows of current measure
   char **rows = NULL;
   int nrows = 0, caprows = 0;
 
@@ -460,21 +452,19 @@ static void parse_note_data_into_chart(Chart *c, const char *noteData) {
   while (1) {
     char ch = *p;
     if (ch == 0) {
-      // finalize if trailing
       if (li > 0) {
         line[li] = 0;
         str_trim_inplace(line);
-        if ((int)strlen(line) >= 4 && strspn(line, "01234MKLmnklo") >= 4) {
+        if ((int)strlen(line) >= 4) {
           if (nrows + 1 > caprows) {
             caprows = caprows ? caprows * 2 : 64;
             rows = (char**)realloc(rows, (size_t)caprows * sizeof(char*));
             if (!rows) die("Out of memory");
           }
-          rows[nrows++] = strdup(line);
+          rows[nrows++] = xstrdup(line);
         }
         li = 0;
       }
-      // flush measure
       if (nrows > 0) {
         for (int r = 0; r < nrows; r++) {
           double beat = (double)measureIndex * 4.0 + (double)r * (4.0 / (double)nrows);
@@ -492,26 +482,22 @@ static void parse_note_data_into_chart(Chart *c, const char *noteData) {
 
     if (ch == '\r') { p++; continue; }
 
-    if (ch == '\n' || ch == ',' ) {
+    if (ch == '\n' || ch == ',') {
       line[li] = 0;
       str_trim_inplace(line);
       if (li > 0) {
-        // Only accept plausible note rows
-        if ((int)strlen(line) >= 4 &&
-            (line[0] == '0' || line[0] == '1' || line[0] == '2' || line[0] == '3' || line[0] == '4' || line[0] == 'M' || line[0] == 'K' || line[0] == 'L' ||
-             line[0] == 'm' || line[0] == 'k' || line[0] == 'l')) {
+        if ((int)strlen(line) >= 4) {
           if (nrows + 1 > caprows) {
             caprows = caprows ? caprows * 2 : 64;
             rows = (char**)realloc(rows, (size_t)caprows * sizeof(char*));
             if (!rows) die("Out of memory");
           }
-          rows[nrows++] = strdup(line);
+          rows[nrows++] = xstrdup(line);
         }
       }
       li = 0;
 
       if (ch == ',') {
-        // end measure: convert rows
         if (nrows > 0) {
           for (int r = 0; r < nrows; r++) {
             double beat = (double)measureIndex * 4.0 + (double)r * (4.0 / (double)nrows);
@@ -531,7 +517,6 @@ static void parse_note_data_into_chart(Chart *c, const char *noteData) {
     }
 
     if (ch == ';') {
-      // end chart note data
       if (li > 0) {
         line[li] = 0;
         str_trim_inplace(line);
@@ -541,7 +526,7 @@ static void parse_note_data_into_chart(Chart *c, const char *noteData) {
             rows = (char**)realloc(rows, (size_t)caprows * sizeof(char*));
             if (!rows) die("Out of memory");
           }
-          rows[nrows++] = strdup(line);
+          rows[nrows++] = xstrdup(line);
         }
         li = 0;
       }
@@ -568,12 +553,12 @@ static void parse_note_data_into_chart(Chart *c, const char *noteData) {
 }
 
 static void finalize_chart_times(const Simfile *sf, Chart *c) {
-  for (int i = 0; i < c->nnotes; i++) {
-    c->notes[i].time = beat_to_time(sf, c->notes[i].beat);
-  }
+  for (int i = 0; i < c->nnotes; i++) c->notes[i].time = beat_to_time(sf, c->notes[i].beat);
 }
 
-static int cmp_note_time_idx(const void *A, const void *B, void *ctx) {
+#if defined(__APPLE__)
+// macOS qsort_r comparator signature: int (*)(void *thunk, const void *, const void *)
+static int cmp_note_time_idx_osx(void *ctx, const void *A, const void *B) {
   const Chart *c = (const Chart*)ctx;
   int ia = *(const int*)A, ib = *(const int*)B;
   double ta = c->notes[ia].time, tb = c->notes[ib].time;
@@ -581,6 +566,7 @@ static int cmp_note_time_idx(const void *A, const void *B, void *ctx) {
   if (ta > tb) return 1;
   return 0;
 }
+#endif
 
 static void chart_build_col_indices(Chart *c) {
   for (int col = 0; col < 4; col++) {
@@ -590,13 +576,11 @@ static void chart_build_col_indices(Chart *c) {
     c->ptrCol[col] = 0;
   }
 
-  // Count
   for (int i = 0; i < c->nnotes; i++) {
     int col = c->notes[i].col;
     if (col >= 0 && col < 4) c->nCol[col]++;
   }
 
-  // Allocate
   int pos[4] = {0,0,0,0};
   for (int col = 0; col < 4; col++) {
     if (c->nCol[col] > 0) {
@@ -605,28 +589,22 @@ static void chart_build_col_indices(Chart *c) {
     }
   }
 
-  // Fill
   for (int i = 0; i < c->nnotes; i++) {
     int col = c->notes[i].col;
     if (col >= 0 && col < 4) c->colIdx[col][pos[col]++] = i;
   }
 
-  // Sort each column by time
 #if defined(__APPLE__)
-  // qsort_r on macOS: qsort_r(base, nmemb, size, thunk, compar)
   for (int col = 0; col < 4; col++) {
     if (c->colIdx[col] && c->nCol[col] > 1) {
-      qsort_r(c->colIdx[col], (size_t)c->nCol[col], sizeof(int), (void*)c, cmp_note_time_idx);
+      qsort_r(c->colIdx[col], (size_t)c->nCol[col], sizeof(int),
+              (void*)c, cmp_note_time_idx_osx);
     }
   }
-#else
-  // fallback: stable enough if notes already ordered; omit
-  (void)cmp_note_time_idx;
 #endif
 }
 
 static int parse_sm_notes_fields(char *val, char **outFields, int maxFields) {
-  // Split by ':' into up to maxFields fields; modifies val in place.
   int n = 0;
   char *p = val;
   while (n < maxFields) {
@@ -640,7 +618,6 @@ static int parse_sm_notes_fields(char *val, char **outFields, int maxFields) {
 }
 
 static void parse_simfile_text(Simfile *sf, const char *text) {
-  // Heuristic: if it has #NOTEDATA, treat as .ssc-like; otherwise .sm-like.
   bool isSSC = contains_icase(text, "#NOTEDATA");
 
   const char *p = text;
@@ -664,11 +641,8 @@ static void parse_simfile_text(Simfile *sf, const char *text) {
 
     if (!isSSC) {
       if (str_ieq(tag, "NOTES")) {
-        // .sm #NOTES has colon-separated fields
         char *fields[8] = {0};
         int nf = parse_sm_notes_fields(val, fields, 8);
-
-        // Expected: 6 fields. Field 0: stepstype, 2: difficulty, 3: meter, 5: notedata
         if (nf >= 6) {
           char *stepstype = fields[0];
           char *difficulty = fields[2];
@@ -689,16 +663,13 @@ static void parse_simfile_text(Simfile *sf, const char *text) {
             parse_note_data_into_chart(&c, notedata);
             sim_add_chart(sf, &c);
           } else {
-            // discard unsupported chart
             free(c.notes);
           }
         }
       }
     } else {
-      // .ssc: charts are in #NOTEDATA blocks
       if (str_ieq(tag, "NOTEDATA")) {
         if (inSSCChart) {
-          // finalize previous chart if it has notes
           if (cur.nnotes > 0 && contains_icase(cur.stepstype, "dance-single")) {
             sim_add_chart(sf, &cur);
           } else {
@@ -724,7 +695,6 @@ static void parse_simfile_text(Simfile *sf, const char *text) {
     val = NULL;
   }
 
-  // finalize last .ssc chart
   if (isSSC && inSSCChart) {
     if (cur.nnotes > 0 && contains_icase(cur.stepstype, "dance-single")) {
       sim_add_chart(sf, &cur);
@@ -733,15 +703,9 @@ static void parse_simfile_text(Simfile *sf, const char *text) {
     }
   }
 
-  // If title missing, set a fallback
   if (sf->title[0] == 0) snprintf(sf->title, sizeof(sf->title), "Untitled");
+  if (!sf->bpms || sf->nbpms == 0) parse_bpms(sf, "0=120");
 
-  // If BPMs missing, default
-  if (!sf->bpms || sf->nbpms == 0) {
-    parse_bpms(sf, "0=120");
-  }
-
-  // Finalize charts: compute times, build column indices
   for (int i = 0; i < sf->ncharts; i++) {
     finalize_chart_times(sf, &sf->charts[i]);
     chart_build_col_indices(&sf->charts[i]);
@@ -790,12 +754,11 @@ static unsigned char judge_color(int j) {
 }
 
 static int judge_for_delta(double dtAbs) {
-  // seconds
-  if (dtAbs <= 0.022) return 0; // MARV-ish
-  if (dtAbs <= 0.045) return 1; // PERF
-  if (dtAbs <= 0.080) return 2; // GREAT
-  if (dtAbs <= 0.120) return 3; // GOOD
-  return 4;                     // MISS
+  if (dtAbs <= 0.022) return 0;
+  if (dtAbs <= 0.045) return 1;
+  if (dtAbs <= 0.080) return 2;
+  if (dtAbs <= 0.120) return 3;
+  return 4;
 }
 
 static void apply_judge(Stats *st, int j) {
@@ -827,23 +790,19 @@ static int map_key_to_col(int k, int *needsMore) {
   if (k == 'f' || k == 'F') return 1;
   if (k == 'j' || k == 'J') return 2;
   if (k == 'k' || k == 'K') return 3;
-
-  // arrow keys: ESC [ A/B/C/D
   if (k == 27) { *needsMore = 1; return -1; }
   return -1;
 }
 
 static int map_arrow_seq_to_col(void) {
   int k1 = read_key_nonblock();
-  if (k1 < 0) return -1;
-  if (k1 != '[') return -1;
+  if (k1 < 0 || k1 != '[') return -1;
   int k2 = read_key_nonblock();
   if (k2 < 0) return -1;
-  // Left=D col0, Down=B col1, Up=A col2, Right=C col3
-  if (k2 == 'D') return 0;
-  if (k2 == 'B') return 1;
-  if (k2 == 'A') return 2;
-  if (k2 == 'C') return 3;
+  if (k2 == 'D') return 0; // left
+  if (k2 == 'B') return 1; // down
+  if (k2 == 'A') return 2; // up
+  if (k2 == 'C') return 3; // right
   return -1;
 }
 
@@ -859,12 +818,10 @@ static void try_hit(Chart *c, Stats *st, int col, double tnow) {
   double dt = tnow - n->time;
   double adt = fabs(dt);
 
-  // too early: ignore input (no ghost taps)
-  if (dt < -0.150) return;
+  if (dt < -0.150) return; // too early
 
   int j = judge_for_delta(adt);
   if (j == 4) {
-    // too late to be a hit; treat as miss
     n->hit = -1;
     c->ptrCol[col]++;
     apply_judge(st, 4);
@@ -930,9 +887,8 @@ static void gameplay_loop(const Simfile *sf, Chart *c) {
   Stats st;
   memset(&st, 0, sizeof(st));
   snprintf(st.lastJudge, sizeof(st.lastJudge), "READY");
-  st.scroll = 18.0; // rows/sec
+  st.scroll = 18.0;
 
-  // Layout
   int headerH = 3;
   int footerH = 3;
   int playY0 = headerH;
@@ -956,14 +912,12 @@ static void gameplay_loop(const Simfile *sf, Chart *c) {
   laneX[2] = center + 2;
   laneX[3] = center + spacing + 1;
 
-  // Determine song end time (last note + a bit)
   double lastT = 0.0;
   for (int i = 0; i < c->nnotes; i++) lastT = MAX(lastT, c->notes[i].time);
   double endT = lastT + 2.0;
 
   term_raw();
 
-  // Short countdown
   double t0 = now_sec();
   while (!g_shouldQuit) {
     double t = now_sec() - t0;
@@ -992,12 +946,10 @@ static void gameplay_loop(const Simfile *sf, Chart *c) {
 
   double start = now_sec();
 
-  // Main loop
   int drawStartIdx = 0;
   while (!g_shouldQuit) {
     double tnow = now_sec() - start;
 
-    // Input
     for (;;) {
       int k = read_key_nonblock();
       if (k < 0) break;
@@ -1013,13 +965,10 @@ static void gameplay_loop(const Simfile *sf, Chart *c) {
 
     apply_auto_miss(c, &st, tnow);
 
-    // End condition
     if (tnow > endT) break;
 
-    // Draw
     screen_clear(&scr);
 
-    // Header
     char h0[512];
     snprintf(h0, sizeof(h0), "%s", sf->title);
     draw_text(&scr, 2, 0, C_TEXT, h0);
@@ -1034,28 +983,21 @@ static void gameplay_loop(const Simfile *sf, Chart *c) {
              tnow, st.score, st.combo, st.maxCombo);
     draw_text(&scr, 2, 2, C_DIM, h2);
 
-    // Box
     draw_box(&scr, boxX0, boxY0, boxX1, boxY1);
 
-    // Lanes vertical guides
     for (int y = boxY0 + 1; y <= boxY1 - 1; y++) {
-      for (int col = 0; col < 4; col++) {
-        set_cell(&scr, laneX[col], y, '.', C_DIM);
-      }
+      for (int col = 0; col < 4; col++) set_cell(&scr, laneX[col], y, '.', C_DIM);
     }
 
-    // Receptors
     for (int col = 0; col < 4; col++) {
       set_cell(&scr, laneX[col], receptorY, '=', col_color(col));
       const char *key = (col==0)?"D":(col==1)?"F":(col==2)?"J":"K";
-      draw_text(&scr, laneX[col]-0, receptorY+1, C_DIM, key);
+      draw_text(&scr, laneX[col], receptorY+1, C_DIM, key);
     }
 
-    // Notes in window
     double lookahead = (double)(receptorY - (boxY0 + 1)) / st.scroll;
     double behind = 0.35;
 
-    // Advance drawStartIdx for efficiency
     while (drawStartIdx < c->nnotes && c->notes[drawStartIdx].time < tnow - behind - 1.0) {
       drawStartIdx++;
     }
@@ -1064,9 +1006,9 @@ static void gameplay_loop(const Simfile *sf, Chart *c) {
       Note *n = &c->notes[i];
       if (n->hit != 0) continue;
 
-      double dt = n->time - tnow; // positive if upcoming
+      double dt = n->time - tnow;
       if (dt < -behind) continue;
-      if (dt > lookahead) break; // approximate: times are mostly ordered
+      if (dt > lookahead) break;
 
       int y = receptorY - (int)lrint(dt * st.scroll);
       if (y <= boxY0 || y >= boxY1) continue;
@@ -1075,7 +1017,6 @@ static void gameplay_loop(const Simfile *sf, Chart *c) {
       set_cell(&scr, x, y, 'O', col_color(n->col));
     }
 
-    // Footer stats + last judge
     char f0[512];
     snprintf(f0, sizeof(f0), "Last: %-5s   MARV %d  PERF %d  GREAT %d  GOOD %d  MISS %d",
              st.lastJudge, st.marv, st.perf, st.great, st.good, st.miss);
@@ -1083,8 +1024,6 @@ static void gameplay_loop(const Simfile *sf, Chart *c) {
 
     draw_text(&scr, 2, th - 1, C_DIM, "Controls: D F J K (or arrows)   +/- scroll speed   Q quit");
 
-    // Colorize "Last:" value by re-drawing just that segment
-    // Find position after "Last: "
     int lastX = 2 + 6;
     unsigned char jc = C_TEXT;
     if (strcmp(st.lastJudge, "MARV") == 0) jc = judge_color(0);
@@ -1096,12 +1035,10 @@ static void gameplay_loop(const Simfile *sf, Chart *c) {
 
     screen_render(&scr);
 
-    // Frame pacing ~60fps
     struct timespec ts = {0, 16 * 1000 * 1000};
     nanosleep(&ts, NULL);
   }
 
-  // Summary
   screen_clear(&scr);
   draw_text(&scr, 2, 1, C_TEXT, "Results");
   draw_text(&scr, 2, 2, C_DIM,  "-------");
@@ -1124,7 +1061,6 @@ static void gameplay_loop(const Simfile *sf, Chart *c) {
   draw_text(&scr, 2, 10, C_DIM, "Press any key to exit...");
   screen_render(&scr);
 
-  // Wait for any key
   while (read_key_nonblock() < 0) {
     struct timespec ts = {0, 30 * 1000 * 1000};
     nanosleep(&ts, NULL);
@@ -1138,7 +1074,6 @@ static int choose_chart_interactive(const Simfile *sf) {
   if (sf->ncharts <= 0) return -1;
   if (sf->ncharts == 1) return 0;
 
-  // Use normal terminal mode for selection (simple, readable)
   fprintf(stderr, "Found %d dance-single chart(s):\n", sf->ncharts);
   for (int i = 0; i < sf->ncharts; i++) {
     const Chart *c = &sf->charts[i];
